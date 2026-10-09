@@ -413,5 +413,14 @@ All architectural decisions, milestone completions, evaluation metrics, and prog
     - Updated FR-006 (retrieval metric exclusions for refusals), FR-007 (strict Markdown citation validation), and FR-009 (development vs sealed test split isolation).
 - **Next Planned Step**: Execute Phase 4 implementation tasks via `/speckit-implement` on branch `002-benchmark-dataset-scaling`.
 
+### Milestone 2026-10-09 08:12: Spec-Kit Convergence Audit (Phase 9 Tasks Appended)
+- **Goal**: Audit codebase against the 5 newly ratified clarifications in `spec.md` and append necessary alignment tasks.
+- **Changes**:
+  - [specs/002-benchmark-dataset-scaling/tasks.md](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/specs/002-benchmark-dataset-scaling/tasks.md):
+    - Appended `Phase 9: Convergence (Ratified Clarifications Alignment)` with 5 new actionable tasks (T034 to T038).
+    - Identified gaps: Out-of-scope retrieval metrics exclusion (GAP-01), Strict Markdown citation links enforcement (GAP-02), and corresponding unit tests (GAP-03, GAP-04).
+  - Synchronized Knowledge Graph via codebase-memory-mcp `index_repository` (nodes: 3380, edges: 7582).
+- **Next Planned Step**: Execute Phase 9 convergence tasks via `/speckit-implement` on branch `002-benchmark-dataset-scaling`.
+
 
 

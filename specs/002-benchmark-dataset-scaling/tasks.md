@@ -183,3 +183,25 @@ Phase 3: US1 FAQ Scaling (T007..T012)    Phase 4: US2 Science Scaling (T013..T01
 4. **Step 4**: Execute Phase 5 & 6 (Decoupled Retrieval & Citation Verification).
 5. **Step 5**: Execute Phase 7 (Master compile to `golden_set.jsonl` and sync to Langfuse Cloud).
 6. **Step 6**: Execute Phase 8 (Verification and Constitution Knowledge Graph refresh).
+
+---
+
+## Phase 9: Convergence (Ratified Clarifications Alignment)
+
+**Goal**: Align retrieval scoring and citation verification with the 5 newly ratified clarifications in `spec.md` (Q-1 through Q-5).
+
+### Findings Summary
+| ID | Area | Severity | Requirement | Description | Target File |
+|---|---|---|---|---|---|
+| GAP-01 | US3 Decoupled Evals | High | FR-006 / Q-1 | Out-of-scope queries (`gold_chunks == []`) currently receive artificial 1.0 hit rate instead of metric exclusion. | `rag-core/src/rag_core/evaluation/retrieval_scorer.py` |
+| GAP-02 | US4 Citation Auditing | High | FR-007 / Q-3 | Citation parser currently accepts loose bracketed tokens rather than strictly requiring Markdown links (`[Title](...#page=N)`). | `rag-core/src/rag_core/postprocessing/citations.py` |
+| GAP-03 | US4 Citation Tests | Medium | FR-007 / Q-3 | Unit tests must enforce strict Markdown link extraction and negative rejection of plain text brackets. | `rag-core/tests/test_citation_eval.py` |
+| GAP-04 | US3 Retrieval Tests | Medium | FR-006 / Q-1 | Unit tests must verify out-of-scope exclusion from aggregate `Hit@k` and `MRR` rates. | `rag-core/tests/test_decoupled_eval.py` |
+| GAP-05 | Polish & Hygiene | Low | Principle X/XII | Re-index repository into Codebase Knowledge Graph and verify zero drift. | `.codebase-memory/graph.db.zst` |
+
+### Tasks
+- [ ] T034 [P] [US3/Q-1] Update `RetrievalScorer.score_query` and `aggregate` in `rag-core/src/rag_core/evaluation/retrieval_scorer.py` to tag out-of-scope queries (`gold_chunks == []`) and exclude them from `Hit@k` and `MRR` calculations per Clarification Q-1
+- [ ] T035 [P] [US4/Q-3] Update citation parser in `rag-core/src/rag_core/postprocessing/citations.py` to extract and validate strict Markdown link citations (`[Title](...#page=N)` / `[Title](...#row=N)`), treating unlinked bracketed text as invalid per Clarification Q-3
+- [ ] T036 [US4/Q-3] Add unit test cases in `rag-core/tests/test_citation_eval.py` asserting strict Markdown link extraction and negative rejection of plain bracketed references
+- [ ] T037 [US3/Q-1] Add unit test cases in `rag-core/tests/test_decoupled_eval.py` verifying that out-of-scope queries do not artificially inflate aggregate `Hit@1`, `Hit@3`, and `MRR`
+- [ ] T038 Refresh Codebase Knowledge Graph via codebase-memory-mcp `index_repository(persistence=True)` and verify zero drift
