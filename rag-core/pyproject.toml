@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rag-core"
+version = "0.1.0"
+description = "Enterprise-grade Modular RAG Core Library with Tri-Layered Evaluation, Knowledge Graph, and Multi-Tool Agent Orchestration"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "Unified RAG Team" }
+]
+dependencies = [
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "qdrant-client>=1.9.0",
+    "neo4j>=5.18.0",
+    "ragas>=0.1.0",
+    "langfuse>=4.17.0",
+    "langchain>=0.2.0",
+    "langchain-core>=0.2.0",
+    "langchain-openai>=0.1.0",
+    "langgraph>=0.1.0",
+    "pymupdf>=1.24.0",
+    "httpx>=0.27.0",
+    "structlog>=24.1.0",
+    "datasets>=2.19.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "mypy>=1.9.0",
+    "ruff>=0.3.0"
+]
+ocr = [
+    "docling>=1.0.0"
+]
+security = [
+    "presidio-analyzer>=2.2.0",
+    "presidio-anonymizer>=2.2.0"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_core"]

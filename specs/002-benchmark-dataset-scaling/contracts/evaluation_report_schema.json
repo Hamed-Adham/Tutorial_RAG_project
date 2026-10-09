@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DecoupledEvaluationReportSchema",
+  "type": "object",
+  "required": [
+    "run_id",
+    "timestamp",
+    "total_queries",
+    "retrieval_metrics",
+    "generation_metrics",
+    "citation_metrics"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "total_queries": {
+      "type": "integer"
+    },
+    "retrieval_metrics": {
+      "type": "object",
+      "required": ["hit_at_1", "hit_at_3", "hit_at_5", "mrr", "context_recall"],
+      "properties": {
+        "hit_at_1": { "type": "number" },
+        "hit_at_3": { "type": "number" },
+        "hit_at_5": { "type": "number" },
+        "mrr": { "type": "number" },
+        "context_recall": { "type": "number" }
+      }
+    },
+    "generation_metrics": {
+      "type": "object",
+      "required": ["faithfulness", "answer_relevancy", "adversarial_refusal_rate"],
+      "properties": {
+        "faithfulness": { "type": "number" },
+        "answer_relevancy": { "type": "number" },
+        "adversarial_refusal_rate": { "type": "number" }
+      }
+    },
+    "citation_metrics": {
+      "type": "object",
+      "required": ["citation_precision", "citation_recall"],
+      "properties": {
+        "citation_precision": { "type": "number" },
+        "citation_recall": { "type": "number" }
+      }
+    },
+    "suite_breakdown": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "timestamp": "2026-10-02 20:52:15",
+  "pipeline_name": "Naive RAG Baseline (Parsimony MVP)",
+  "split": "dev",
+  "total_items": 2,
+  "overall_passed": 0,
+  "overall_pass_rate": 0.0,
+  "mean_latency_seconds": 7.028,
+  "suite_breakdown": {
+    "science_textbook": {
+      "passed": 0,
+      "total": 2,
+      "pass_rate": 0.0
+    }
+  },
+  "detailed_results": [
+    {
+      "id": "GT-SCI-001",
+      "suite": "science_textbook",
+      "question": "مراحل حل مسئله به روش علمی در علوم تجربی چیست؟",
+      "answer": "اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد.",
+      "retrieved_sources": [
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p02_c02",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.5809069275856018
+        },
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p04_c00",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.5554648637771606
+        },
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p03_c02",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.5538532137870789
+        }
+      ],
+      "latencies": {
+        "retrieval": 0.07,
+        "generation": 8.513,
+        "total": 8.582
+      },
+      "metrics": {
+        "faithfulness": {
+          "verdict": 1,
+          "thought": "کاربر درباره مراحل حل مسئله به روش علمی سوال پرسیده است. در متن بازیابی‌شده تنها به صورت یک تمرین ذکر شده که 'دربارهٔ حل یک مسئله به روش علمی گفت‌وگو کنید و مراحل آن را بنویسید' و مراحل آن بیان نشده است. سیستم به درستی اعلام کرده که اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد و از ایجاد هرگونه توهم یا اطلاعات برون‌متنی خودداری کرده است."
+        },
+        "answer_relevancy": {
+          "verdict": 0,
+          "thought": "نیت کاربر آگاهی از مراحل حل مسئله به روش علمی در علوم تجربی است. پاسخ ارائه‌شده توسط سیستم اعلام کرده که اطلاعات در مستندات موجود نیست و هیچ پاسخی به پرسش کاربر نداده و نیاز اطلاعاتی او را برطرف نکرده است؛ بنابراین کل پرسش بدون پاسخ مانده است."
+        }
+      },
+      "overall_verdict": 0
+    },
+    {
+      "id": "GT-SCI-002",
+      "suite": "science_textbook",
+      "question": "چرا آزمایش علمی باید تکرارپذیر باشد و متغیرها کنترل شوند؟",
+      "answer": "اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد.",
+      "retrieved_sources": [
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p03_c02",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.5014874935150146
+        },
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p04_c00",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.49994999170303345
+        },
+        {
+          "chunk_id": "C706_olom_haftom-7-144-2-5_p02_c00",
+          "source_type": "science_textbook",
+          "source_name": "C706_olom_haftom-7-144-2-5.pdf",
+          "score": 0.4792589247226715
+        }
+      ],
+      "latencies": {
+        "retrieval": 0.05,
+        "generation": 5.424,
+        "total": 5.474
+      },
+      "metrics": {
+        "faithfulness": {
+          "verdict": 1,
+          "thought": "کاربر درباره دلیل تکرارپذیر بودن آزمایش علمی و کنترل متغیرها پرسیده است. در متن بازیابی‌شده هیچ اشاره‌ای به تکرارپذیری آزمایش و کنترل متغیرها وجود ندارد. مدل نیز به درستی اعلام کرده است که اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد و از بیان هرگونه ادعای برون‌متنی و توهم خودداری کرده است. بنابراین پاسخ کاملاً وفادار و معتبر است."
+        },
+        "answer_relevancy": {
+          "verdict": 0,
+          "thought": "پرسش کاربر به دنبال دلیل علمی لزوم تکرارپذیری آزمایش و کنترل متغیرهاست. پاسخ سیستم بدون ارائه هیچ پاسخی به سوال اصلی، اعلام کرده که اطلاعات در مستندات موجود نیست و نیازمندی کاربر را بی‌پاسخ گذاشته است."
+        }
+      },
+      "overall_verdict": 0
+    }
+  ]
+}

@@ -1,0 +1,348 @@
+openapi: 3.1.0
+info:
+  title: Enterprise RAG Service API
+  version: 1.2.0
+  description: OpenAPI interface contract for Enterprise RAG backend service supporting document ingestion, streaming chat, vector retrieval, and evaluation benchmarks.
+paths:
+  /api/v1/chat:
+    post:
+      summary: Submit a conversational query (streaming or buffered)
+      operationId: chatQuery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        '200':
+          description: Successful response (SSE stream or structured JSON)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+        '400':
+          description: Bad request or validation failure
+        '500':
+          description: Internal server error
+
+  /api/v1/rag/retrieve:
+    post:
+      summary: Direct retrieval endpoint across dense, BM25, and hybrid indices
+      operationId: retrieveChunks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetrievalRequest'
+      responses:
+        '200':
+          description: Ranked retrieved chunk candidates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetrievalResponse'
+
+  /api/v1/documents:
+    get:
+      summary: List documents in manifest catalog
+      operationId: listDocuments
+      parameters:
+        - name: tenant_id
+          in: query
+          schema:
+            type: string
+            default: default
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, parsing, indexed, failed]
+      responses:
+        '200':
+          description: List of cataloged documents
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DocumentManifestRecord'
+    post:
+      summary: Upload and ingest new document
+      operationId: uploadDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                tenant_id:
+                  type: string
+                  default: default
+                acl_roles:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '201':
+          description: Document accepted and cataloged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentManifestRecord'
+
+  /api/v1/documents/{doc_id}:
+    delete:
+      summary: Immediate synchronous cascade hard-delete across Postgres, Qdrant, BM25, and Neo4j
+      operationId: deleteDocument
+      parameters:
+        - name: doc_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Document and all child vectors/nodes completely purged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  doc_id:
+                    type: string
+                  status:
+                    type: string
+                    example: deleted
+                  purged_indices:
+                    type: array
+                    items:
+                      type: string
+                    example: ["postgres_manifest", "qdrant_vectors", "bm25_index", "neo4j_subgraph"]
+        '404':
+          description: Document not found
+        '500':
+          description: Cascade deletion error (transaction rolled back)
+
+  /api/v1/evaluation/run:
+    post:
+      summary: Trigger evaluation run across Golden Benchmark suites
+      operationId: triggerEvaluation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                suite:
+                  type: string
+                  enum: [all, science_textbook, admin_faq, domain_routing, adversarial_refusal]
+                  default: all
+                gates_only:
+                  type: boolean
+                  default: false
+                limit:
+                  type: integer
+                  nullable: true
+      responses:
+        '200':
+          description: Evaluation run report and metric summaries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvaluationReport'
+
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          example: مراحل حل مسئله به روش علمی در علوم تجربی چیست؟
+        session_id:
+          type: string
+          example: sess-abc-123
+        stream:
+          type: boolean
+          default: false
+        tenant_id:
+          type: string
+          default: default
+        acl_roles:
+          type: array
+          items:
+            type: string
+          default: ["public"]
+
+    ChatResponse:
+      type: object
+      required:
+        - answer
+        - citations
+      properties:
+        answer:
+          type: string
+        is_refusal:
+          type: boolean
+          default: false
+        refusal_reason:
+          type: string
+          nullable: true
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+        latency_seconds:
+          type: number
+        trace_id:
+          type: string
+
+    Citation:
+      type: object
+      required:
+        - doc_id
+        - page
+        - text
+      properties:
+        doc_id:
+          type: string
+        filename:
+          type: string
+        page:
+          type: integer
+        breadcrumb:
+          type: string
+        bbox:
+          type: array
+          items:
+            type: number
+          nullable: true
+        text:
+          type: string
+
+    RetrievalRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+        top_k:
+          type: integer
+          default: 5
+        strategy:
+          type: string
+          enum: [dense, bm25, hybrid, graph]
+          default: hybrid
+        tenant_id:
+          type: string
+          default: default
+        acl_roles:
+          type: array
+          items:
+            type: string
+          default: ["public"]
+
+    RetrievalResponse:
+      type: object
+      required:
+        - candidates
+        - latency_seconds
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: '#/components/schemas/RetrievalCandidate'
+        latency_seconds:
+          type: number
+
+    RetrievalCandidate:
+      type: object
+      required:
+        - chunk_id
+        - doc_id
+        - score
+        - text
+      properties:
+        chunk_id:
+          type: string
+        doc_id:
+          type: string
+        score:
+          type: number
+        text:
+          type: string
+        breadcrumb:
+          type: string
+        page:
+          type: integer
+
+    DocumentManifestRecord:
+      type: object
+      required:
+        - doc_id
+        - filename
+        - sha256_hash
+        - status
+      properties:
+        doc_id:
+          type: string
+        filename:
+          type: string
+        sha256_hash:
+          type: string
+        tenant_id:
+          type: string
+        status:
+          type: string
+        page_count:
+          type: integer
+        total_chunks:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    EvaluationReport:
+      type: object
+      required:
+        - run_id
+        - total_items
+        - gate_pass_rate
+        - metrics
+      properties:
+        run_id:
+          type: string
+        total_items:
+          type: integer
+        gate_pass_rate:
+          type: number
+        refusal_accuracy:
+          type: number
+        domain_routing_accuracy:
+          type: number
+        metrics:
+          type: object
+          properties:
+            faithfulness:
+              type: number
+            answer_relevancy:
+              type: number
+            context_precision:
+              type: number
+            context_recall:
+              type: number
+            average_judge_latency_seconds:
+              type: number

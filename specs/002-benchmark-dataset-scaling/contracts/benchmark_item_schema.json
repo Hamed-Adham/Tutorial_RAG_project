@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BenchmarkItemSchema",
+  "type": "object",
+  "required": ["input", "expected_output", "metadata"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier e.g. FAQ-COLLOQ-001 or SCI-EXP-014"
+    },
+    "input": {
+      "type": "string",
+      "minLength": 5,
+      "description": "The user prompt or query in Persian"
+    },
+    "expected_output": {
+      "type": "string",
+      "minLength": 2,
+      "description": "The reference ground truth answer or refusal explanation"
+    },
+
+    "metadata": {
+      "type": "object",
+      "required": [
+        "suite",
+        "split",
+        "category",
+        "query_type",
+        "ground_truth_chunks",
+        "expected_behavior",
+        "expected_route"
+      ],
+      "properties": {
+        "suite": {
+          "type": "string",
+          "enum": [
+            "administrative_faq",
+            "science_textbook",
+            "domain_routing",
+            "adversarial_refusal"
+          ]
+        },
+        "split": {
+          "type": "string",
+          "enum": ["dev", "test"]
+        },
+        "category": {
+          "type": "string"
+        },
+        "query_type": {
+          "type": "string",
+          "enum": [
+            "factoid",
+            "reasoning",
+            "multi_hop",
+            "colloquial_paraphrase",
+            "hard_negative_keyword",
+            "diagram",
+            "experiment",
+            "adversarial",
+            "cross_domain_routing"
+          ]
+        },
+        "ground_truth_doc_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "ground_truth_chunks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
+        "expected_behavior": {
+          "type": "string",
+          "enum": ["answer", "refusal", "disambiguate"]
+        },
+        "expected_route": {
+          "type": "string",
+          "enum": [
+            "administrative_faq",
+            "science_textbook",
+            "refuse"
+          ]
+        },
+        "requires_multi_hop": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

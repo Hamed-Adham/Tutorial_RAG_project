@@ -1,0 +1,36 @@
+schema_version: "1.0"
+# SpecKit Extension Hooks for Unified RAG
+# Automated lifecycle triggers for Codebase Memory Knowledge Graph synchronization
+
+hooks:
+  before_plan:
+    - name: "codebase-memory.verify-index"
+      extension: "codebase-memory"
+      command: "codebase-memory-verify"
+      description: "Verify codebase knowledge graph is initialized and check drift before planning architecture"
+      prompt: "Check codebase memory status via codebase-memory-mcp index_status and detect_changes before planning."
+      optional: true
+
+  after_implement:
+    - name: "codebase-memory.reindex"
+      extension: "codebase-memory"
+      command: "codebase-memory-reindex"
+      description: "Re-index repository into Knowledge Graph and persist compressed artifact .codebase-memory/graph.db.zst"
+      prompt: "Call codebase-memory-mcp index_repository(repo_path='/Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG', persistence=True, mode='full') and verify zero drift with detect_changes."
+      optional: false
+
+  before_converge:
+    - name: "codebase-memory.query-state"
+      extension: "codebase-memory"
+      command: "codebase-memory-query"
+      description: "Query codebase knowledge graph to accurately assess existing vs missing modules"
+      prompt: "Use codebase-memory-mcp get_architecture and search_graph to verify what is already implemented before appending convergence tasks."
+      optional: false
+
+  after_converge:
+    - name: "codebase-memory.reindex-convergence"
+      extension: "codebase-memory"
+      command: "codebase-memory-reindex"
+      description: "Re-index repository into Knowledge Graph after convergence implementations"
+      prompt: "Call codebase-memory-mcp index_repository(repo_path='/Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG', persistence=True, mode='full') to update graph.db.zst."
+      optional: false

@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Unified RAG - Naive Baseline Architecture",
+    "output": "architecture/naive/naive-rag-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 430],
+    "views": [
+      {
+        "id": "query-synthesis",
+        "label": "Online Query & Retrieval Path",
+        "focus": ["eval_harness", "pipeline", "retriever", "index_cache", "nine_router", "llm_service"],
+        "note": "Follows runtime queries from the evaluation benchmark through dense cosine similarity and local Gemini LLM answer synthesis."
+      },
+      {
+        "id": "offline-indexing",
+        "label": "Offline Ingestion & Caching Path",
+        "focus": ["data_sources", "doc_loader", "index_cache", "nine_router", "bge_m3"],
+        "note": "Raw PDF textbook and FAQ CSV extraction, fixed-window chunking, and persistent 1024-d embedding caching."
+      },
+      {
+        "id": "eval-gate",
+        "label": "5-Part LLM Judge & Quality Gate",
+        "focus": ["eval_harness", "pipeline", "llm_judge", "llm_service"],
+        "note": "Evaluates Faithfulness, Relevancy, Routing, and Refusal with mandatory step-by-step Persian Chain of Thought."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "eval_harness",
+      "type": "frontend",
+      "label": "Client & Benchmark",
+      "sublabel": "Golden Set (75 dev) / CLI",
+      "pos": [60, 180],
+      "size": [160, 54],
+      "tag": "Dev Set"
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "Naive Pipeline Facade",
+      "sublabel": "pipeline.py Orchestrator",
+      "pos": [300, 180],
+      "size": [160, 54],
+      "tag": "Parsimony MVP"
+    },
+    {
+      "id": "retriever",
+      "type": "backend",
+      "label": "Dense Retriever",
+      "sublabel": "retriever.py / Top-k=3",
+      "pos": [540, 180],
+      "size": [160, 54],
+      "tag": "Cosine Dot-Product"
+    },
+    {
+      "id": "nine_router",
+      "type": "cloud",
+      "label": "Nine Router Gateway",
+      "sublabel": ":20128/v1 Local API",
+      "pos": [780, 180],
+      "size": [160, 54],
+      "tag": "Unified Proxy"
+    },
+    {
+      "id": "llm_judge",
+      "type": "security",
+      "label": "5-Part LLM Judge",
+      "sublabel": "judge_evaluator.py",
+      "pos": [300, 50],
+      "size": [160, 54],
+      "tag": "XML & Persian CoT"
+    },
+    {
+      "id": "llm_service",
+      "type": "backend",
+      "label": "Gemini CLI Service",
+      "sublabel": "gemini-cli (temp=0.0)",
+      "pos": [780, 50],
+      "size": [160, 54],
+      "tag": "Grounded Generator"
+    },
+    {
+      "id": "data_sources",
+      "type": "database",
+      "label": "Heterogeneous Data",
+      "sublabel": "15 PDFs + 134 FAQ CSV",
+      "pos": [60, 310],
+      "size": [160, 54],
+      "tag": "266 Docs"
+    },
+    {
+      "id": "doc_loader",
+      "type": "backend",
+      "label": "Loader & Chunker",
+      "sublabel": "loader.py + chunker.py",
+      "pos": [300, 310],
+      "size": [160, 54],
+      "tag": "539 Chunks (500c)"
+    },
+    {
+      "id": "index_cache",
+      "type": "database",
+      "label": "Numpy Index Cache",
+      "sublabel": "naive_index.npz (539 vec)",
+      "pos": [540, 310],
+      "size": [160, 54],
+      "tag": "1024-d Persisted"
+    },
+    {
+      "id": "bge_m3",
+      "type": "backend",
+      "label": "BGE-M3 Service",
+      "sublabel": "un/gpustack/bge-m3-GGUF",
+      "pos": [780, 310],
+      "size": [160, 54],
+      "tag": "120ms Batch"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Local Application & Baseline RAG Subsystem",
+      "wraps": ["eval_harness", "data_sources", "doc_loader", "pipeline", "retriever", "index_cache", "llm_judge"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Nine Router Inference Gateway (:20128)",
+      "wraps": ["nine_router", "bge_m3", "llm_service"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "raw-to-loader",
+      "from": "data_sources",
+      "to": "doc_loader",
+      "label": "parse docs"
+    },
+    {
+      "id": "loader-to-cache",
+      "from": "doc_loader",
+      "to": "index_cache",
+      "label": "store chunks"
+    },
+    {
+      "id": "query-input",
+      "from": "eval_harness",
+      "to": "pipeline",
+      "label": "query(q)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pipeline-to-retriever",
+      "from": "pipeline",
+      "to": "retriever",
+      "label": "top_k=3"
+    },
+    {
+      "id": "retriever-to-cache",
+      "from": "retriever",
+      "to": "index_cache",
+      "label": "cosine match",
+      "labelDy": 20
+    },
+    {
+      "id": "retriever-to-router",
+      "from": "retriever",
+      "to": "nine_router",
+      "label": "query embed"
+    },
+    {
+      "id": "router-to-llm",
+      "from": "nine_router",
+      "to": "llm_service",
+      "label": "gemini-cli"
+    },
+    {
+      "id": "router-to-bge",
+      "from": "nine_router",
+      "to": "bge_m3",
+      "label": "bge-m3",
+      "labelDy": 20
+    },
+    {
+      "id": "pipeline-to-judge",
+      "from": "pipeline",
+      "to": "llm_judge",
+      "label": "audit",
+      "variant": "security"
+    },
+    {
+      "id": "judge-to-llm",
+      "from": "llm_judge",
+      "to": "llm_service",
+      "label": "rubric prompt",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Parsimony Baseline (Ground Zero)",
+      "items": [
+        "Fixed-window 500-char chunking with 50-char sliding overlap (no complex hierarchical trees)",
+        "In-memory numpy cosine similarity with persistent .npz serialization (zero database setup)",
+        "Single-shot generation with strict Persian grounding and missing-information fallback"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Nine Router Inference Gateway",
+      "items": [
+        "BGE-M3 exposed at un/gpustack/bge-m3-GGUF producing 1024-d dense unit vectors in ~120ms",
+        "Gemini CLI local endpoint handling grounded synthesis with temperature 0.0 and stream=False",
+        "Centralized routing abstracts model serving from application code"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "5-Part Meta-Evaluation Harness",
+      "items": [
+        "75 dev / 25 test stratified benchmark across 4 heterogeneous Persian suites",
+        "Persona, Binary 0/1 Verdict, XML Data Boundaries, and Mandatory Step-by-Step Persian CoT",
+        "Establishes empirical baseline to quantitatively validate subsequent optimization stages"
+      ]
+    }
+  ]
+}
