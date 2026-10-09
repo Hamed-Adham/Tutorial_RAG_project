@@ -106,10 +106,10 @@ As an operations engineer, I want the expanded benchmark to be cataloged in a st
 - **FR-003**: The system MUST expand the science textbook benchmark suite across all 15 curriculum chapters using extracted structured markdown representations, scaling the science suite to at least 180 curated items.
 - **FR-004**: Each science benchmark item MUST be attributed to explicit source locations, including document identifier, page number, and section classification (main body, activity, or experiment).
 - **FR-005**: The benchmark generation process MUST produce balanced query complexity types, including point factoids, multi-hop conceptual reasoning, diagram descriptions, and procedural experiment inquiries.
-- **FR-006**: The evaluation execution engine MUST decouple intermediate evaluation stages, outputting independent retrieval metrics (top-rank hit rates, mean reciprocal rank, context recall) and generation metrics (groundedness/faithfulness, answer relevancy).
-- **FR-007**: The evaluation engine MUST verify citation fidelity, checking whether generated citations accurately match reference source locations and penalizing fabricated or misattributed citations.
+- **FR-006**: The evaluation execution engine MUST decouple intermediate evaluation stages, outputting independent retrieval metrics (Hit@1, Hit@3, Hit@5, MRR, Context Recall) and generation metrics (groundedness/faithfulness, answer relevancy, refusal accuracy). Out-of-scope and adversarial queries MUST be excluded from retrieval hit metrics and evaluated exclusively on refusal accuracy.
+- **FR-007**: The evaluation engine MUST verify citation fidelity, checking whether generated citations adhere strictly to Markdown link syntax (`[Title](...#page=N)`) matching gold source locations, penalizing fabricated or misattributed citations.
 - **FR-008**: All generated benchmark items MUST adhere to a standardized 3-column representation (`input`, `expected_output`, `metadata`) with structured metadata capturing suite, split, query type, ground truth chunks, expected route, and expected behavior.
-- **FR-009**: The benchmark dataset MUST enforce a deterministic 75/25 development and sealed test split to prevent overfitting during prompt and retrieval tuning.
+- **FR-009**: The benchmark dataset MUST enforce a deterministic 75/25 development and sealed test split to prevent overfitting during prompt and retrieval tuning. Development routines MUST target `--split dev`; `--split test` MUST be sealed and evaluated only during pre-release gates and CI.
 - **FR-010**: The system MUST synchronize all benchmark items and split variations to the central observability platform under scoped virtual namespaces (`dev`, `test`, and `suites`).
 
 ### Key Entities
@@ -120,6 +120,37 @@ As an operations engineer, I want the expanded benchmark to be cataloged in a st
 - **RetrievalMetrics**: Quantitative measures of search quality, including Hit@k (k=1, 3, 5), Mean Reciprocal Rank (MRR), and Context Recall.
 - **GenerationMetrics**: Quantitative measures of synthesis quality, including Groundedness/Faithfulness, Answer Relevancy, and Refusal Accuracy.
 - **CitationVerification**: An evaluation result assessing whether source citations in a generated answer match reference ground truth chunks without hallucination.
+
+---
+
+## Clarifications *(Ratified 2026-10-09)*
+
+### Session 1 - Evaluation & Generation Rules (2026-10-09)
+
+1. **Q-1: Out-of-Scope & Adversarial Retrieval Evaluation**
+   - **Question**: How should decoupled retrieval evaluation score out-of-scope and adversarial queries that have no valid factual chunks in the knowledge base?
+   - **Resolution**: Exclude out-of-scope queries from retrieval hit-rate metrics (Hit@k, MRR) and score them strictly on refusal accuracy at the synthesizer stage.
+   - **Impact**: Eliminates retrieval penalty on unserviceable queries; separates retrieval failures from intentional refusals.
+
+2. **Q-2: Multi-Hop Partial Context Retrieval Scoring**
+   - **Question**: How should decoupled retrieval evaluation score multi-hop queries when only a subset of the required gold chunks is retrieved in top-k?
+   - **Resolution**: Linear proportional credit (`Context Recall = retrieved_gold_chunks / total_required_gold_chunks`). `Hit@k` counts as positive if at least one required gold chunk appears in top-k.
+   - **Impact**: Provides smooth, informative retrieval gradients for complex queries rather than an artificial all-or-nothing penalty.
+
+3. **Q-3: Citation Syntax Validation Standard**
+   - **Question**: What citation syntax should the automated citation auditing engine accept and validate when scoring source provenance?
+   - **Resolution**: Strict Markdown link format only (`[Document Title](file:///path#page=N)` or `[FAQ Title](faq_qa_pairs.csv#row=N)`). Plain bracketed text references (`[منبع: ...]`) are treated as unverified.
+   - **Impact**: Enforces clickable, reproducible citation UX across all user-facing answers.
+
+4. **Q-4: Sealed Test Set Isolation & Workflow Gating**
+   - **Question**: How should the evaluation harness enforce split boundaries between the 75% Development set and the 25% Sealed Test set to prevent benchmark overfitting?
+   - **Resolution**: Strict workflow isolation. Routine development and retrieval parameter tuning run exclusively against `--split dev` (318 items). The sealed `--split test` (107 items) is reserved strictly for pre-release quality gates and CI merge verification.
+   - **Impact**: Prevents data leakage and ensures the test split remains an untainted empirical benchmark.
+
+5. **Q-5: Synthetic Query Generation Determinism & Caching**
+   - **Question**: How should temperature diversity and execution caching be handled during synthetic benchmark query generation?
+   - **Resolution**: Partitioned temperature with local disk caching. Temperature is set to 0.2 for factoid and grounding extraction, and 0.7 for colloquial and adversarial paraphrasing. All generation steps are backed by an idempotent JSON cache to eliminate duplicate API calls on re-runs.
+   - **Impact**: Guarantees reproducibility, cost efficiency, and resilient resumption after API rate limits or network hiccups.
 
 ---
 

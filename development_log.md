@@ -396,5 +396,22 @@ All architectural decisions, milestone completions, evaluation metrics, and prog
     - Updated Quality & Verification Gates with **Pre-Commit Human Approval Gate** and **Boundary Schema Validation Gate**.
 - **Next Planned Step**: Continue execution of feature tasks in `specs/002-benchmark-dataset-scaling` via `/speckit-implement` adhering to Principle XI.
 
+### Milestone 2026-10-09 07:56: Ratification of Enterprise Professionalism & The Tool Trinity (v1.6.0)
+- **Goal**: Institutionalize zero-shortcuts, fail-loudly clarification, and mandatory execution through the Git + Spec-Kit + Langfuse Trinity.
+- **Changes**:
+  - [.agents/rules/agent-rules.md](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/.agents/rules/agent-rules.md): Added mandatory Rule 6 (Enterprise Professionalism, No Shortcuts & The Tool Trinity).
+  - [.specify/memory/constitution.md](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/.specify/memory/constitution.md):
+    - Bumped semantic version from 1.5.0 to 1.6.0 (MINOR).
+    - Added **Principle XII: Enterprise Rigor & The Tool Trinity (Git, Spec-Kit, Langfuse) (Non-Negotiable)**.
+- **Next Planned Step**: Continue interactive Spec-Kit clarification (`/speckit-clarify`) or resume Phase 4 implementation (`/speckit-implement`).
+
+### Milestone 2026-10-09 08:01: Spec-Kit Clarification Completed for Feature 002
+- **Goal**: Resolve all critical ambiguities across retrieval scoring, partial context credit, citation syntax, split isolation, and synthetic query caching.
+- **Changes**:
+  - [specs/002-benchmark-dataset-scaling/spec.md](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/specs/002-benchmark-dataset-scaling/spec.md):
+    - Added ratified `Clarifications (2026-10-09)` section covering Q-1 through Q-5.
+    - Updated FR-006 (retrieval metric exclusions for refusals), FR-007 (strict Markdown citation validation), and FR-009 (development vs sealed test split isolation).
+- **Next Planned Step**: Execute Phase 4 implementation tasks via `/speckit-implement` on branch `002-benchmark-dataset-scaling`.
+
 
 
