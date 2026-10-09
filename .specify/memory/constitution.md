@@ -1,9 +1,9 @@
 <!--
 SYNC IMPACT REPORT
-- Version Change: 1.4.0 → 1.5.0 (MINOR: Added Principle XI: Software Engineering & Change Discipline; added Pre-Commit Human Approval Gate and Boundary Schema Validation Gate)
+- Version Change: 1.5.0 → 1.6.0 (MINOR: Added Principle XII: Enterprise Rigor & The Tool Trinity (Git, Spec-Kit, Langfuse))
 - Modified Principles:
-  - Added XI. Software Engineering & Change Discipline (Non-Negotiable): Mandates human approval before git commit/push, Conventional Commits referencing Spec-Kit Task IDs, scope restatement prior to code modifications, schema-first boundary validation with fail-loudly semantics, zero dead code, and credential hygiene.
-- Added Sections: Pre-Commit Human Approval Gate and Boundary Schema Validation Gate under Quality & Verification Gates
+  - Added XII. Enterprise Rigor & The Tool Trinity (Git, Spec-Kit, Langfuse) (Non-Negotiable): Forbids superficial MVPs or fragile workarounds, mandates proactive questioning upon ambiguity, and establishes Git, Spec-Kit, and Langfuse as the non-negotiable operational trinity.
+- Added Sections: None
 - Removed Sections: None
 - Follow-up TODOs: None
 -->
@@ -111,6 +111,16 @@ Strict development workflow, commit conventions, and quality control discipline 
 5. **Zero-Credential Policy**:
    - Secrets, API credentials, private tokens, and environment values MUST NEVER be included in commits. `.env`, `.pem`, and credential files MUST be verified against `.gitignore` prior to staging.
 
+### XII. Enterprise Rigor & The Tool Trinity (Git, Spec-Kit, Langfuse) (Non-Negotiable)
+This project is engineered to enterprise standards; superficial "MVPs", fragile shortcuts, or unreviewed workarounds are strictly forbidden:
+1. **No Shortcuts & Zero Unreviewed Hacks**: Every abstraction, schema, pipeline stage, and test suite must be built with production-grade robustness. Never deploy placeholder stubs, superficial mockups, or unvetted workarounds.
+2. **Proactive Clarification Over Ungrounded Assumption**: Whenever ambiguity, conflicting constraints, or technical hurdles arise, agents and engineers MUST NOT improvise silent workarounds. They must stop and proactively ask targeted questions to verify intent before proceeding.
+3. **The Mandatory Tool Trinity**:
+   The primary developmental objective across all phases is to fully experience, master, and operate through the integrated tool trinity:
+   - **Git Workflow**: Local branches, atomic Conventional Commits referencing Spec-Kit Task IDs, clean history, zero secret leaks, and mandatory human review before commits.
+   - **Spec-Kit Workflow**: Rigorous execution of the complete Spec-Driven Development (SDD) lifecycle without bypassing governance: Constitution -> Specify -> Clarify -> Plan -> Checklist -> Tasks -> Implement -> Converge.
+   - **Langfuse Workflow**: Exhaustive LLM observability, hierarchical trace/span instrumentation, dataset management with sealed splits, and quantitative scoring via automated harnesses.
+
 ## Phased Implementation Standard
 
 Engineering deliverables must follow an incremental hill-climbing lifecycle:
@@ -135,4 +145,4 @@ Engineering deliverables must follow an incremental hill-climbing lifecycle:
 2. Any architectural deviations, new dependencies, or metric threshold changes require explicit justification, documentation, and baseline updates.
 3. Code reviews must verify compliance with the 3-layer decoupling, security boundaries, and evaluation coverage.
 
-**Version**: 1.5.0 | **Ratified**: 2026-10-01 | **Last Amended**: 2026-10-09 | **Status**: Active
+**Version**: 1.6.0 | **Ratified**: 2026-10-01 | **Last Amended**: 2026-10-09 | **Status**: Active

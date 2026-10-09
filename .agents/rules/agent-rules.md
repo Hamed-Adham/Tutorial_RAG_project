@@ -38,3 +38,12 @@
   - `/speckit-converge`: Audit codebase against spec/plan/tasks and append missing implementation tasks.
   - `/speckit-implement`: Execute code implementation following `tasks.md`.
 - Conclude or frame every interaction with a clear Spec-Kit recommendation based on where the work currently stands.
+
+## 6. Enterprise Professionalism, No Shortcuts & The Tool Trinity (Mandatory)
+- **High Rigor & No Fragile Workarounds**: This project is super professional and production-grade. Do NOT build superficial "MVPs", cut corners, or deploy fragile hacks. Build robust, well-tested, and maintainable software.
+- **Ask Questions When Stuck**: If you face ambiguity, conflicting requirements, or technical blockers, NEVER improvise silent workarounds or make ungrounded assumptions. Stop and proactively ask the user clear, targeted questions to resolve the issue.
+- **The Core Development Trinity (Git + Spec-Kit + Langfuse)**:
+  The explicit objective of the development phase is to fully experience and strictly execute the project using these three workflows:
+  1. **Git Workflow**: Local feature branches, atomic Conventional Commits referencing Spec-Kit Task IDs, clean git log history, and mandatory human approval before any commit or push.
+  2. **Spec-Kit Workflow (Spec-Driven Development)**: Full lifecycle discipline without skipping steps: Constitution -> Specify -> Clarify -> Plan -> Checklist -> Tasks -> Implement -> Converge.
+  3. **Langfuse Workflow**: Rigorous LLM observability, trace/span hierarchy (latency, tokens, costs), dataset curation (dev/test stratified splits), and automated evaluation scoring.

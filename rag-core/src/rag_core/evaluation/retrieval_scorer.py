@@ -20,14 +20,16 @@ class RetrievalQueryEvaluation:
     hit_at_5: float = 0.0
     mrr: float = 0.0
     context_recall: float = 0.0
+    is_out_of_scope: bool = False
 
     def __post_init__(self):
-        # Auto-calculate if not provided and chunks are present
-        if self.hit_at_1 == 0.0 and self.hit_at_3 == 0.0 and self.hit_at_5 == 0.0 and self.mrr == 0.0 and self.context_recall == 0.0:
-            if not self.gold_chunks:
-                self.hit_at_1 = self.hit_at_3 = self.hit_at_5 = self.mrr = self.context_recall = 1.0
-                return
+        # Auto-calculate if not provided
+        if not self.gold_chunks:
+            self.is_out_of_scope = True
+            self.hit_at_1 = self.hit_at_3 = self.hit_at_5 = self.mrr = self.context_recall = 0.0
+            return
 
+        if self.hit_at_1 == 0.0 and self.hit_at_3 == 0.0 and self.hit_at_5 == 0.0 and self.mrr == 0.0 and self.context_recall == 0.0:
             gold_set = set(g.strip().lower() for g in self.gold_chunks if g)
             first_hit_rank: Optional[int] = None
             matched = set()
@@ -84,15 +86,17 @@ class RetrievalScorer:
         retrieved_list = list(retrieved_chunks)
 
         if not gold_list:
-            # If no gold chunks required (e.g., pure refusal query with no relevant documents)
+            # Out-of-scope / adversarial queries have no factual chunks to retrieve.
+            # Tagged as out-of-scope and excluded from hit metrics per Clarification Q-1.
             return RetrievalQueryEvaluation(
                 gold_chunks=gold_list,
                 retrieved_chunks=retrieved_list,
-                hit_at_1=1.0,
-                hit_at_3=1.0,
-                hit_at_5=1.0,
-                mrr=1.0,
-                context_recall=1.0
+                hit_at_1=0.0,
+                hit_at_3=0.0,
+                hit_at_5=0.0,
+                mrr=0.0,
+                context_recall=0.0,
+                is_out_of_scope=True
             )
 
         first_hit_rank: Optional[int] = None
@@ -118,14 +122,17 @@ class RetrievalScorer:
             hit_at_3=hit_3,
             hit_at_5=hit_5,
             mrr=mrr,
-            context_recall=recall
+            context_recall=recall,
+            is_out_of_scope=False
         )
 
     def aggregate(self, evaluations: Sequence[RetrievalQueryEvaluation]) -> RetrievalMetricsModel:
         """
         Aggregates per-query evaluations into dataset-level RetrievalMetricsModel.
+        Excludes out-of-scope/adversarial queries (Clarification Q-1).
         """
-        if not evaluations:
+        in_scope = [e for e in evaluations if not e.is_out_of_scope]
+        if not in_scope:
             return RetrievalMetricsModel(
                 hit_at_1=0.0,
                 hit_at_3=0.0,
@@ -134,12 +141,12 @@ class RetrievalScorer:
                 context_recall=0.0
             )
 
-        n = len(evaluations)
-        h1 = sum(e.hit_at_1 for e in evaluations) / n
-        h3 = sum(e.hit_at_3 for e in evaluations) / n
-        h5 = sum(e.hit_at_5 for e in evaluations) / n
-        mrr = sum(e.mrr for e in evaluations) / n
-        recall = sum(e.context_recall for e in evaluations) / n
+        n = len(in_scope)
+        h1 = sum(e.hit_at_1 for e in in_scope) / n
+        h3 = sum(e.hit_at_3 for e in in_scope) / n
+        h5 = sum(e.hit_at_5 for e in in_scope) / n
+        mrr = sum(e.mrr for e in in_scope) / n
+        recall = sum(e.context_recall for e in in_scope) / n
 
         return RetrievalMetricsModel(
             hit_at_1=round(h1, 4),

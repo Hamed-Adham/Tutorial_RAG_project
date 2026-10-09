@@ -71,6 +71,23 @@ class TestDecoupledRetrievalScorer(unittest.TestCase):
         self.assertEqual(metrics.hit_at_5, 0.75)
         self.assertAlmostEqual(metrics.mrr, (1.0 + 0.5 + 0.25 + 0.0) / 4.0, places=4)
 
+    def test_out_of_scope_query_exclusion(self):
+        # Out-of-scope query has empty gold_chunks
+        res = self.scorer.score_query(gold_chunks=[], retrieved_chunks=["docA#page=1"])
+        self.assertTrue(res.is_out_of_scope)
+        self.assertEqual(res.hit_at_1, 0.0)
+        self.assertEqual(res.mrr, 0.0)
+
+        # In-scope query: hit_1 = 1.0, mrr = 1.0
+        in_scope = RetrievalQueryEvaluation(gold_chunks=["doc1"], retrieved_chunks=["doc1"])
+        # Out-of-scope query
+        out_scope = self.scorer.score_query(gold_chunks=[], retrieved_chunks=["random_chunk"])
+
+        # Aggregate should calculate metrics strictly over in_scope queries (n=1)
+        metrics = self.scorer.aggregate([in_scope, out_scope])
+        self.assertEqual(metrics.hit_at_1, 1.0)
+        self.assertEqual(metrics.mrr, 1.0)
+
     def test_decoupled_report_serialization(self):
         report = DecoupledEvaluationReportModel(
             run_id="run-test-001",

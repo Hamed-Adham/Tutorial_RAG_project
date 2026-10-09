@@ -14,29 +14,39 @@ from rag_core.postprocessing.citations import (
 
 
 class TestCitationProvenanceEval(unittest.TestCase):
-    def test_parse_standard_citation_block(self):
+    def test_parse_markdown_link_citations(self):
         answer = (
+            "انرژی پتانسیل گرانشی به ارتفاع و جرم وابسته است.\n\n"
+            "**Sources:**\n"
+            "[1] [chapter_08.pdf – page 4](chapter_08.pdf#page=4)\n"
+            "[2] [chapter_08.pdf – page 5](file:///data/docs/chapter_08.pdf#page=5)\n"
+            "همچنین در [آیین‌نامه دانش‌بنیان](faq_qa_pairs.csv#row=42) و [سوال ۴۲](faq_042) تشریح شده است."
+        )
+        cited = parse_citations_from_text(answer)
+        self.assertEqual(len(cited), 4)
+        self.assertIn("chapter_08.pdf#page=4", cited)
+        self.assertIn("chapter_08.pdf#page=5", cited)
+        self.assertIn("faq_qa_pairs.csv#row=42", cited)
+        self.assertIn("faq_042", cited)
+
+    def test_negative_rejection_of_plain_brackets_and_unlinked_text(self):
+        # Clarification Q-3: Plain bracketed references or bare URIs must be rejected as unverified
+        plain_bracket_block = (
             "انرژی پتانسیل گرانشی به ارتفاع و جرم وابسته است.\n\n"
             "**Sources:**\n"
             "[1] chapter_08.pdf – page 4\n"
             "[2] chapter_08.pdf – page 5\n"
         )
-        cited = parse_citations_from_text(answer)
-        self.assertEqual(len(cited), 2)
-        self.assertIn("chapter_08.pdf#page=4", cited)
-        self.assertIn("chapter_08.pdf#page=5", cited)
+        self.assertEqual(parse_citations_from_text(plain_bracket_block), [])
 
-    def test_parse_uri_format_citation(self):
-        answer = "پاسخ بر اساس (C706_olom_haftom-7-144-6-11.pdf#page=3) ارائه شده است."
-        cited = parse_citations_from_text(answer)
-        self.assertEqual(len(cited), 1)
-        self.assertEqual(cited[0], "C706_olom_haftom-7-144-6-11.pdf#page=3")
+        plain_catalog_token = "مطابق با آیین‌نامه [faq_042] وام قرض‌الحسنه پرداخت می‌شود."
+        self.assertEqual(parse_citations_from_text(plain_catalog_token), [])
 
-    def test_parse_faq_catalog_citation(self):
-        answer = "مطابق با آیین‌نامه [faq_042] وام قرض‌الحسنه پرداخت می‌شود."
-        cited = parse_citations_from_text(answer)
-        self.assertEqual(len(cited), 1)
-        self.assertEqual(cited[0], "faq_042")
+        bare_uri = "پاسخ بر اساس C706_olom_haftom-7-144-6-11.pdf#page=3 ارائه شده است."
+        self.assertEqual(parse_citations_from_text(bare_uri), [])
+
+        generic_bracket = "بر اساس [منبع: کتاب علوم تجربی هفتم] فرضیه مطرح شد."
+        self.assertEqual(parse_citations_from_text(generic_bracket), [])
 
     def test_perfect_citation_provenance(self):
         gold = ["chapter_08.pdf#page=4", "chapter_08.pdf#page=5"]

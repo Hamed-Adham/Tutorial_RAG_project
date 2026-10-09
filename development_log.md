@@ -422,5 +422,23 @@ All architectural decisions, milestone completions, evaluation metrics, and prog
   - Synchronized Knowledge Graph via codebase-memory-mcp `index_repository` (nodes: 3380, edges: 7582).
 - **Next Planned Step**: Execute Phase 9 convergence tasks via `/speckit-implement` on branch `002-benchmark-dataset-scaling`.
 
+### Milestone 2026-10-09 08:20: Phase 9 Convergence Implementation (Tasks T034-T038)
+- **Goal**: Align decoupled retrieval scoring and citation auditing engines with the 5 newly ratified clarifications in `spec.md` (Q-1 through Q-5).
+- **Changes & Deliverables**:
+  - **T034 / Q-1 (Retrieval Scoring Out-of-Scope Exclusion)**:
+    - [rag-core/src/rag_core/evaluation/retrieval_scorer.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/evaluation/retrieval_scorer.py): Updated `RetrievalScorer.score_query` and `aggregate` to tag out-of-scope/adversarial queries (`gold_chunks == []`) with `is_out_of_scope = True` and exclude them from dataset-level `Hit@1`, `Hit@3`, `Hit@5`, and `MRR`.
+  - **T035 / Q-3 (Strict Markdown Citation Links)**:
+    - [rag-core/src/rag_core/postprocessing/citations.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/postprocessing/citations.py): Updated `_format_inline` to emit strict Markdown link citations (`[Title – page N](doc.pdf#page=N)`) and `parse_citations_from_text` to strictly extract Markdown links with `#page=\d+` or `#row=\d+`, rejecting unlinked bracket tokens and plain text as unverified.
+  - **T036 / Q-3 (Citation Unit & Negative Tests)**:
+    - [rag-core/tests/test_citation_eval.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/tests/test_citation_eval.py): Added `test_parse_markdown_link_citations` and `test_negative_rejection_of_plain_brackets_and_unlinked_text`.
+  - **T037 / Q-1 (Decoupled Retrieval Tests)**:
+    - [rag-core/tests/test_decoupled_eval.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/tests/test_decoupled_eval.py): Added `test_out_of_scope_query_exclusion` confirming uninflated hit rates on adversarial queries.
+  - **T038 (Codebase Knowledge Graph Refresh)**:
+    - Re-indexed repository via `codebase-memory-mcp` with persistent artifact `.codebase-memory/graph.db.zst` (3,381 nodes, 7,599 edges).
+  - **Verification**:
+    - Full test suite: 61/61 unit and contract tests passed in 1.9s.
+    - Marked Phase 9 tasks `T034` to `T038` as `[X]` in [specs/002-benchmark-dataset-scaling/tasks.md](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/specs/002-benchmark-dataset-scaling/tasks.md).
+- **Next Planned Step**: Present Pre-Commit Gate for human approval before committing changes to Git branch `002-benchmark-dataset-scaling`.
+
 
 

@@ -88,7 +88,7 @@ class CitationBundle:
 
 def _format_inline(citations: List[PageCitation]) -> str:
     """
-    Build a numbered citation block grouped by document.
+    Build a numbered citation block grouped by document using strict Markdown links.
 
     Documents are listed in the order their first citation appears.
     Pages within a document are deduplicated and sorted.
@@ -109,10 +109,11 @@ def _format_inline(citations: List[PageCitation]) -> str:
     for i, key in enumerate(order, start=1):
         pages = sorted(seen[key])
         if len(pages) == 1:
-            page_str = f"page {pages[0]}"
+            p = pages[0]
+            lines.append(f"[{i}] [{key} – page {p}]({key}#page={p})")
         else:
-            page_str = "pages " + ", ".join(str(p) for p in pages)
-        lines.append(f"[{i}] {key} – {page_str}")
+            page_links = ", ".join(f"[{p}]({key}#page={p})" for p in pages)
+            lines.append(f"[{i}] [{key}]({key}#page={pages[0]}) – pages {page_links}")
 
     return "\n".join(lines)
 
@@ -240,35 +241,40 @@ class CitationAuditResult:
 def parse_citations_from_text(text: str) -> List[str]:
     """
     Extracts citation chunk identifiers from answer text.
-    Handles:
-    - '[1] filename.pdf – page 4'
-    - 'filename.pdf#page=4'
-    - 'faq_042' or 'CH01-SEC-0001'
+    Strictly requires Markdown link format per Clarification Q-3:
+    - '[Document Title](filename.pdf#page=4)' -> 'filename.pdf#page=4'
+    - '[Document Title](file:///path/to/doc.pdf#page=5)' -> 'doc.pdf#page=5'
+    - '[FAQ Title](faq_qa_pairs.csv#row=42)' -> 'faq_qa_pairs.csv#row=42'
+    - '[FAQ Title](faq_042)' -> 'faq_042'
+
+    Plain bracketed references (e.g. '[1]', '[faq_042]', '[منبع: ...]')
+    and bare unlinked URIs are treated as unverified and excluded.
     """
     if not text:
         return []
 
     citations: List[str] = []
 
-    # 1. Standard citation block lines: [1] filename.pdf – page 4 (or pages 3, 7)
-    pattern_block = re.findall(r"\[\d+\]\s+([^\n–\-]+?)\s*[–\-]\s*pages?\s*([0-9,\s]+)", text, re.IGNORECASE)
-    for doc, pages_str in pattern_block:
-        doc_clean = doc.strip()
-        pages = re.findall(r"\d+", pages_str)
-        for p in pages:
-            citations.append(f"{doc_clean}#page={p}")
+    # Match all Markdown links: [anchor](target)
+    link_pattern = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", text)
+    for _anchor, target in link_pattern:
+        target_clean = target.strip().replace("\\", "/")
+        # 1. Target with #page=N or #row=N fragment
+        m_frag = re.search(r"([^/\s)]+?)#(page=\d+|row=\d+)", target_clean)
+        if m_frag:
+            doc_file = m_frag.group(1).strip()
+            fragment = m_frag.group(2).strip()
+            citation_id = f"{doc_file}#{fragment}"
+            if citation_id not in citations:
+                citations.append(citation_id)
+            continue
 
-    # 2. URI fragment citations: filename.pdf#page=12
-    pattern_uri = re.findall(r"([a-zA-Z0-9_\-\.]+\.pdf#page=\d+)", text)
-    for uri in pattern_uri:
-        if uri not in citations:
-            citations.append(uri)
-
-    # 3. Canonical catalog tokens: faq_042 or CH01-SEC-0001
-    pattern_catalog = re.findall(r"\b(faq_\d{3}|CH\d{2}-SEC-\d{4})\b", text)
-    for cat in pattern_catalog:
-        if cat not in citations:
-            citations.append(cat)
+        # 2. Target with catalog ID token (e.g. faq_042 or CH01-SEC-0001)
+        m_cat = re.search(r"\b(faq_\d{3}|CH\d{2}-SEC-\d{4})\b", target_clean)
+        if m_cat:
+            cat_id = m_cat.group(1).strip()
+            if cat_id not in citations:
+                citations.append(cat_id)
 
     return citations
 
