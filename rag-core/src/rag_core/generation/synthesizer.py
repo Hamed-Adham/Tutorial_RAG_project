@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from rag_core.postprocessing.citations import CitationFormatter
 
@@ -63,6 +63,18 @@ class SynthesisResult:
 
     citations_text: str = ""
     """Formatted citation block appended after the answer."""
+
+    raw_completion: str = ""
+    """Raw text completion returned by the LLM."""
+
+    full_prompt: str = ""
+    """Full assembled prompt sent to the LLM (system + user with context)."""
+
+    system_prompt: str = ""
+    """System prompt instruction applied during synthesis."""
+
+    context_block: str = ""
+    """Context block embedded within the user message."""
 
 
 # ---------------------------------------------------------------------------
@@ -133,23 +145,80 @@ class ResponseSynthesizer:
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
-        base_url: str = "http://localhost:20128/v1",
-        api_key: str = "none",
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         max_tokens: int = 1024,
         temperature: float = 0.0,
         context_max_chars: int = 6000,
         tracker: Optional[Any] = None,
     ) -> None:
-        self._model = model
-        self._base_url = base_url
-        self._api_key = api_key
+        from rag_core.config import Settings
+        settings = Settings()
+
+        self._model = model or settings.llm_model or "open-code"
+        self._base_url = base_url or settings.nine_router_base_url or "http://localhost:20128/v1"
+        self._api_key = api_key if (api_key and api_key != "none") else (settings.nine_router_api_key or "none")
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._context_max_chars = context_max_chars
         self._tracker = tracker
         self._citation_formatter = CitationFormatter()
         self._client: Optional[Any] = None  # Lazy-init openai.OpenAI
+        self._async_client: Optional[Any] = None  # Lazy-init openai.AsyncOpenAI
+
+    def _get_async_client(self) -> Any:
+        """Lazily initialise the AsyncOpenAI client."""
+        if self._async_client is None:
+            from openai import AsyncOpenAI
+
+            self._async_client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+            )
+        return self._async_client
+
+    async def synthesize_stream(
+        self,
+        query: str,
+        chunks: List[Any],
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Stream the grounded response token by token as an asynchronous generator.
+        Yields individual text tokens as they arrive from the LLM.
+        """
+        # Handle empty context — immediate fallback
+        if not chunks:
+            yield ANSWER_NOT_FOUND
+            return
+
+        context_block = _build_context_block(chunks, self._context_max_chars)
+        sys_prompt = system_prompt or SYSTEM_PROMPT_GROUNDED
+        if any("؀" <= ch <= "ۿ" for ch in query):
+            user_message = f"<context>\n{context_block}\n</context>\n\nپرسش: {query}\nپاسخ مستند به زبان فارسی:"
+        else:
+            user_message = f"<context>\n{context_block}\n</context>\n\nQuestion: {query}"
+
+        try:
+            client = self._get_async_client()
+            stream = await client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+                stream=True,
+            )
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        except Exception as exc:
+            logger.warning("Streaming synthesis failed: %s, falling back to static text", exc)
+            yield f"بر اساس متون استخراج شده:\n{context_block[:300]}..."
 
     def synthesize(
         self,
@@ -183,11 +252,20 @@ class ResponseSynthesizer:
                 latency_seconds=time.perf_counter() - t_start,
                 model=self._model,
                 citations_text="",
+                raw_completion=ANSWER_NOT_FOUND,
+                full_prompt="",
+                system_prompt=system_prompt or SYSTEM_PROMPT_GROUNDED,
+                context_block="",
             )
 
         context_block = _build_context_block(chunks, self._context_max_chars)
         sys_prompt = system_prompt or SYSTEM_PROMPT_GROUNDED
-        user_message = f"<context>\n{context_block}\n</context>\n\nQuestion: {query}"
+        if any("\u0600" <= ch <= "\u06ff" for ch in query):
+            user_message = f"<context>\n{context_block}\n</context>\n\nپرسش: {query}\nپاسخ مستند به زبان فارسی:"
+        else:
+            user_message = f"<context>\n{context_block}\n</context>\n\nQuestion: {query}"
+
+        full_prompt = f"System:\n{sys_prompt}\n\nUser:\n{user_message}"
 
         # Attempt LLM call
         try:
@@ -207,8 +285,13 @@ class ResponseSynthesizer:
 
             latency = time.perf_counter() - t_start
 
-            # Detect "I don't know" style fallback in model output
-            is_fallback = ANSWER_NOT_FOUND.lower()[:30] in answer_text.lower()
+            # Detect "I don't know" style fallback in model output (English or Persian)
+            is_fallback = (
+                ANSWER_NOT_FOUND.lower()[:30] in answer_text.lower()
+                or "اطلاعات کافی برای پاسخ" in answer_text
+                or "اطلاعاتی درباره این پرسش در کتاب یافت نشد" in answer_text
+                or "اطلاعات کافی در بافت ارائه نشده" in answer_text
+            )
 
             # Append citations to the answer
             full_answer = answer_text
@@ -232,13 +315,24 @@ class ResponseSynthesizer:
                 completion_tokens=getattr(usage, "completion_tokens", 0),
                 total_tokens=getattr(usage, "total_tokens", 0),
                 citations_text=citation_bundle.inline_text,
+                raw_completion=answer_text,
+                full_prompt=full_prompt,
+                system_prompt=sys_prompt,
+                context_block=context_block,
             )
 
         except ImportError:
             logger.warning(
                 "openai package not installed — returning mock synthesis result."
             )
-            return self._mock_result(query, citation_bundle.inline_text, t_start)
+            return self._mock_result(
+                query=query,
+                citations_text=citation_bundle.inline_text,
+                t_start=t_start,
+                sys_prompt=sys_prompt,
+                user_msg=user_message,
+                ctx_block=context_block,
+            )
 
         except Exception as exc:
             logger.error("Synthesizer LLM call failed: %s", exc, exc_info=True)
@@ -249,6 +343,10 @@ class ResponseSynthesizer:
                 is_fallback=True,
                 latency_seconds=latency,
                 model=self._model,
+                raw_completion=ANSWER_NOT_FOUND,
+                full_prompt=full_prompt,
+                system_prompt=sys_prompt,
+                context_block=context_block,
             )
 
     def _get_client(self) -> Any:
@@ -262,17 +360,49 @@ class ResponseSynthesizer:
             )
         return self._client
 
+    def generate_raw(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = 200,
+        temperature: float = 0.0,
+    ) -> Optional[str]:
+        """Generate a short raw text completion for query rewriting, expansion, or decomposition."""
+        try:
+            client = self._get_client()
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            logger.warning("generate_raw failed: %s", exc)
+            return None
+
     def _mock_result(
-        self, query: str, citations_text: str, t_start: float
+        self,
+        query: str,
+        citations_text: str,
+        t_start: float,
+        sys_prompt: str = "",
+        user_msg: str = "",
+        ctx_block: str = "",
     ) -> SynthesisResult:
         """Return a deterministic mock result for tests without an LLM."""
-        answer = f"[MOCK ANSWER] Based on the retrieved context, here is a synthesised response for: '{query}'"
-        if citations_text:
-            answer += f"\n\n**Sources:**\n{citations_text}"
+        raw_ans = f"[MOCK ANSWER] Based on the retrieved context, here is a synthesised response for: '{query}'"
+        answer = f"{raw_ans}\n\n**Sources:**\n{citations_text}" if citations_text else raw_ans
         return SynthesisResult(
             answer=answer,
             is_fallback=False,
             latency_seconds=time.perf_counter() - t_start,
             model="mock",
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
             citations_text=citations_text,
+            raw_completion=raw_ans,
+            full_prompt=f"System:\n{sys_prompt}\n\nUser:\n{user_msg}" if sys_prompt else query,
+            system_prompt=sys_prompt,
+            context_block=ctx_block,
         )
