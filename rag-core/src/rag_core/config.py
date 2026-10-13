@@ -32,6 +32,12 @@ def load_env_file(env_path: Path):
 
 load_env_file(ENV_FILE)
 
+# Ensure HuggingFace and Transformers use local cached weights without hanging network retries
+if "HF_HUB_OFFLINE" not in os.environ:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+if "TRANSFORMERS_OFFLINE" not in os.environ:
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 # Synchronize Langfuse environment variables for SDK, LangChain CallbackHandler, and external tools
 if "LANGFUSE_BASE_URL" in os.environ and "LANGFUSE_HOST" not in os.environ:
     os.environ["LANGFUSE_HOST"] = os.environ["LANGFUSE_BASE_URL"]

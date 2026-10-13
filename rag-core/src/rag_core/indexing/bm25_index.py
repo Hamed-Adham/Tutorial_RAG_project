@@ -26,6 +26,11 @@ class PersianTextProcessor:
         if _HAZM_AVAILABLE:
             self.normalizer = Normalizer()
             self.stemmer = Stemmer()
+            # Eagerly warmup internal regex and affix tables to eliminate first-query cold start
+            try:
+                _ = self.tokenize("گرم")
+            except Exception:
+                pass
         else:
             self.normalizer = None
             self.stemmer = None
