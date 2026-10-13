@@ -265,6 +265,77 @@ class JevJudge:
                 details={"fallback_reason": str(e), "thought": fb_thought}
             )
 
+    def evaluate_context_recall(
+        self,
+        query: str,
+        ground_truth: str,
+        context: str
+    ) -> JevEvaluationVerdict:
+        """
+        Evaluate semantic context recall using TypeSafe Jev System One.
+        Answers: Does the retrieved context contain the essential factual evidence,
+        definitions, principles, or formulas to substantiate ground_truth for query?
+        """
+        state = {
+            "user_query": query,
+            "ground_truth_answer": ground_truth,
+            "retrieved_context": context[:4000] if context else ""
+        }
+        questions = {
+            "context_coverage": {
+                "type": "noul",
+                "instructions": (
+                    "Does `retrieved_context` contain sufficient factual information, definitions, "
+                    "or scientific principles to substantiate `ground_truth_answer` for `user_query`?"
+                ),
+                "criteria": {
+                    "true": (
+                        "The retrieved context explicitly contains the necessary facts, concepts, "
+                        "or evidence to answer the query according to the ground truth."
+                    ),
+                    "false": (
+                        "The retrieved context misses the key required information or is completely irrelevant."
+                    )
+                }
+            }
+        }
+
+        t0 = time.perf_counter()
+        try:
+            res = self.client.system_one(state=state, questions=questions)
+            ans = res.get("answers", {}).get("context_coverage", {})
+            prob = float(ans.get("noul", 0.0))
+            conf = float(ans.get("confidence", 1.0))
+            latency = res.get("_latency_seconds", time.perf_counter() - t0)
+
+            if conf < self.min_confidence_threshold:
+                raise RuntimeError(f"Low Jev confidence ({conf:.2f} < {self.min_confidence_threshold})")
+
+            verdict = 1 if prob >= 0.70 else 0
+            return JevEvaluationVerdict(
+                verdict=verdict,
+                score=prob,
+                metric_name="context_coverage",
+                confidence=conf,
+                latency_seconds=latency,
+                fallback_used=False,
+                details=ans
+            )
+        except Exception as e:
+            # Fallback heuristic: check content word overlap between ground_truth and context
+            gt_words = [w for w in ground_truth.lower().split() if len(w) > 3]
+            ctx_lower = context.lower() if context else ""
+            overlap = (sum(1 for w in gt_words if w in ctx_lower) / len(gt_words)) if gt_words else 0.0
+            return JevEvaluationVerdict(
+                verdict=1 if overlap >= 0.50 else 0,
+                score=round(overlap, 4),
+                metric_name="context_coverage",
+                confidence=0.85,
+                latency_seconds=time.perf_counter() - t0,
+                fallback_used=True,
+                details={"fallback_reason": str(e), "overlap": overlap}
+            )
+
     def evaluate_all_speculative(
         self,
         query: str,

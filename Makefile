@@ -1,4 +1,4 @@
-.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy kg-status build up down clean
+.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy eval-science-advanced build-bm25 index-science-qdrant kg-status build up down clean
 
 PYTHON := .venv/bin/python
 PYTHONPATH := rag-core/src
@@ -85,6 +85,15 @@ sync-langfuse:
 
 eval-legacy:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) rag-core/src/rag_core/naive/run_baseline_eval.py --split dev --judge jev
+
+build-bm25:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) rag-core/src/rag_core/indexing/build_science_bm25.py
+
+index-science-qdrant:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) rag-core/src/rag_core/indexing/index_science_qdrant.py
+
+eval-science-advanced:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval --pipeline advanced --suite science_textbook
 
 
 # ── Codebase Knowledge Graph ─────────────────────────────────────────────────

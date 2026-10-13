@@ -94,6 +94,29 @@ class TestJevJudge(unittest.TestCase):
         self.assertEqual(res.verdict, 0)
         self.assertAlmostEqual(res.score, 0.95)
 
+    def test_context_recall_pass(self):
+        self.mock_client.system_one.return_value = {
+            "answers": {
+                "context_coverage": {"noul": 0.95, "confidence": 0.92}
+            },
+            "_latency_seconds": 0.22
+        }
+        res = self.judge.evaluate_context_recall("Query", "Ground Truth", "Context text with evidence")
+        self.assertEqual(res.verdict, 1)
+        self.assertAlmostEqual(res.score, 0.95)
+        self.assertFalse(res.fallback_used)
+
+    def test_context_recall_fail(self):
+        self.mock_client.system_one.return_value = {
+            "answers": {
+                "context_coverage": {"noul": 0.30, "confidence": 0.88}
+            },
+            "_latency_seconds": 0.18
+        }
+        res = self.judge.evaluate_context_recall("Query", "Ground Truth", "Irrelevant context")
+        self.assertEqual(res.verdict, 0)
+        self.assertAlmostEqual(res.score, 0.30)
+
     def test_fallback_on_network_error(self):
         self.mock_client.system_one.side_effect = RuntimeError("Network timeout")
         self.mock_llm_judge.evaluate_metric.return_value = {

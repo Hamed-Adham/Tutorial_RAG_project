@@ -177,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only deterministic retrieval evaluation (Hit@k, MRR, Context Recall) with zero LLM judge tokens",
     )
     parser.add_argument(
+        "--audit-jev",
+        action="store_true",
+        help="Run dual-scorer audit comparing mechanical RetrievalScorer vs semantic JevJudge",
+    )
+    parser.add_argument(
         "--dataset",
         default=None,
         help="Path to the golden benchmark JSONL file",
@@ -185,6 +190,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-id",
         default=None,
         help="Override the auto-generated evaluation run ID",
+    )
+    parser.add_argument(
+        "--pipeline",
+        choices=["naive", "advanced"],
+        default="naive",
+        help="RAG pipeline implementation to evaluate ('naive' or 'advanced')",
     )
     parser.add_argument(
         "--verbose",
@@ -256,18 +267,57 @@ def main(argv: Optional[list] = None) -> int:
 
     dataset_path = Path(args.dataset) if args.dataset else None
 
+    retriever_obj = None
+    synthesizer_obj = None
+
+    if args.pipeline == "advanced":
+        import asyncio
+        from rag_core.pipeline import AdvancedRAGPipeline
+        from rag_core.generation.synthesizer import SynthesisResult
+
+        print("⚡ Instantiating Advanced Enterprise RAG Pipeline (BM25 + Qdrant Dense + bge-reranker-v2-m3)...")
+        advanced_pipe = AdvancedRAGPipeline()
+        advanced_pipe.warmup()
+        cached_results = {}
+        loop = asyncio.new_event_loop()
+
+        class AdvancedRetrieverAdapter:
+            def retrieve(self, question: str):
+                if args.retrieval_only:
+                    return loop.run_until_complete(advanced_pipe.retrieve(question))
+                if question not in cached_results:
+                    cached_results[question] = loop.run_until_complete(advanced_pipe.query(question))
+                res = cached_results[question]
+                return res.retrieved_chunks
+
+        class AdvancedSynthesizerAdapter:
+            def synthesize(self, question: str, chunks: Any):
+                if question not in cached_results:
+                    cached_results[question] = loop.run_until_complete(advanced_pipe.query(question))
+                res = cached_results[question]
+                return SynthesisResult(
+                    answer=res.answer,
+                    is_fallback=res.is_refusal,
+                    latency_seconds=res.latency_profile.get("synthesis_ms", 0.0) / 1000.0,
+                    model="advanced-pipeline"
+                )
+
+        retriever_obj = AdvancedRetrieverAdapter()
+        synthesizer_obj = AdvancedSynthesizerAdapter()
+
     if args.retrieval_only:
         print("🔍 Starting Decoupled Retrieval Evaluation (0 LLM Tokens, < 2s)...")
         gate = QualityGate(QualityGateConfig(retrieval_only=True, hit_at_3=0.0, mrr=0.0, context_recall=0.0))
         harness = EvaluationHarness(
-            retriever=None,
-            synthesizer=None,
+            retriever=retriever_obj,
+            synthesizer=synthesizer_obj,
             ragas_evaluator=None,
             quality_gate=gate,
             dataset_path=dataset_path,
             limit=args.limit,
             run_id=args.run_id,
             retrieval_only=True,
+            audit_jev=args.audit_jev,
         )
     else:
         # Full RAGAS evaluation
@@ -276,18 +326,22 @@ def main(argv: Optional[list] = None) -> int:
         print("   Run `make eval` or configure --dataset / --limit as needed.\n")
 
         harness = EvaluationHarness(
-            # retriever and synthesizer are None here; override for integration runs
-            retriever=None,
-            synthesizer=None,
+            retriever=retriever_obj,
+            synthesizer=synthesizer_obj,
             ragas_evaluator=None,
             quality_gate=QualityGate(),
             dataset_path=dataset_path,
             limit=args.limit,
             run_id=args.run_id,
             retrieval_only=False,
+            audit_jev=args.audit_jev,
         )
 
-    report = harness.run(suite_filter=args.suite, split_filter=args.split)
+    suite_to_run = args.suite
+    if args.pipeline == "advanced" and (suite_to_run is None or suite_to_run == "science"):
+        suite_to_run = "science_textbook"
+
+    report = harness.run(suite_filter=suite_to_run, split_filter=args.split)
     print("\n" + report.summary_str())
 
     if args.output:
@@ -304,6 +358,9 @@ def main(argv: Optional[list] = None) -> int:
 
     if args.save:
         manager.save(report)
+
+    if args.pipeline == "advanced" and "advanced_pipe" in locals():
+        advanced_pipe.tracker.flush()
 
     return 0 if report.quality_gate_passed else 1
 

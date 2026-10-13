@@ -46,7 +46,8 @@ class Settings:
     # Nine Router Settings (Local LLM & Embedding Proxy)
     nine_router_base_url: str = os.getenv("NINE_ROUTER_BASE_URL", os.getenv("OPENAI_BASE_URL", "http://localhost:20128/v1"))
     nine_router_api_key: str = os.getenv("NINE_ROUTER_API_KEY", os.getenv("OPENAI_API_KEY", "sk-83c65355ea1ab6f8-h7nd68-fcf94cfe"))
-    llm_model: str = os.getenv("LLM_MODEL", "gemini-cli")
+    llm_model: str = os.getenv("LLM_MODEL", "open-code")
+    rerank_timeout_ms: float = float(os.getenv("RERANK_TIMEOUT_MS", "3000.0"))
 
     # OmniRoute Settings (Local Gateway on Port 20130)
     omniroute_base_url: str = os.getenv("OMNIROUTE_BASE_URL", "http://localhost:20130/v1")

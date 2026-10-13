@@ -64,6 +64,9 @@ class ItemResult:
     citation_recall: float = 0.0
     is_refusal: bool = False
 
+    semantic_context_recall: float = 0.0
+    recall_alignment: str = "N/A"
+
     latency_seconds: float = 0.0
     error: Optional[str] = None
 
@@ -79,6 +82,7 @@ class EvaluationReport:
     mean_answer_relevancy: float = 0.0
     mean_context_precision: float = 0.0
     mean_context_recall: float = 0.0
+    mean_semantic_context_recall: float = 0.0
 
     mean_hit_at_1: float = 0.0
     mean_hit_at_3: float = 0.0
@@ -97,6 +101,7 @@ class EvaluationReport:
 
     items: List[ItemResult] = field(default_factory=list)
     suite_breakdown: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    alignment_summary: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise to a JSON-safe dict."""
@@ -150,6 +155,23 @@ class EvaluationReport:
     def summary_str(self) -> str:
         """Return a formatted summary string for CLI output."""
         gate_icon = "✅" if self.quality_gate_passed else "❌"
+        adv_items = [i for i in self.items if i.suite == "adversarial_refusal"]
+        refusal_str = f"{self.mean_adversarial_refusal_rate:.3f}" if adv_items else "N/A (no adv items)"
+        align_block = ""
+        if self.alignment_summary:
+            total_audited = sum(self.alignment_summary.values()) or 1
+            agreed = self.alignment_summary.get("AGREED_HIT", 0) + self.alignment_summary.get("AGREED_MISS", 0)
+            agree_pct = (agreed / total_audited) * 100.0
+            align_block = (
+                f"  [Scorer Alignment Audit: JevJudge vs RetrievalScorer]\n"
+                f"    Semantic Rec : {self.mean_semantic_context_recall:.3f} (JevJudge Content Recall)\n"
+                f"    URI Recall   : {self.mean_context_recall:.3f} (_matches_chunk URI Recall)\n"
+                f"    Agreed Hits  : {self.alignment_summary.get('AGREED_HIT', 0)}\n"
+                f"    Agreed Misses: {self.alignment_summary.get('AGREED_MISS', 0)}\n"
+                f"    URI False Miss: {self.alignment_summary.get('URI_FALSE_MISS', 0)} (Jev found content, URI missed)\n"
+                f"    URI False Hit : {self.alignment_summary.get('URI_FALSE_HIT', 0)} (URI matched, Jev found no content)\n"
+                f"    Agreement    : {agree_pct:.1f}%\n"
+            )
         return (
             f"Evaluation Report [{self.run_id}]\n"
             f"  Items          : {self.successful_items}/{self.total_items} successful\n"
@@ -159,10 +181,11 @@ class EvaluationReport:
             f"    Hit@5        : {self.mean_hit_at_5:.3f}\n"
             f"    MRR          : {self.mean_mrr:.3f}\n"
             f"    Ctx Recall   : {self.mean_context_recall:.3f} (threshold ≥ 0.70)\n"
+            f"{align_block}"
             f"  [Generation Metrics]\n"
             f"    Faithfulness : {self.mean_faithfulness:.3f} (threshold ≥ 0.80)\n"
             f"    Ans Relevancy: {self.mean_answer_relevancy:.3f} (threshold ≥ 0.75)\n"
-            f"    Refusal Rate : {self.mean_adversarial_refusal_rate:.3f}\n"
+            f"    Refusal Rate : {refusal_str}\n"
             f"  [Citation Metrics]\n"
             f"    Citation Prec: {self.mean_citation_precision:.3f}\n"
             f"    Citation Rec : {self.mean_citation_recall:.3f}\n"
@@ -219,6 +242,8 @@ class EvaluationHarness:
         limit: Optional[int] = None,
         run_id: Optional[str] = None,
         retrieval_only: bool = False,
+        jev_judge: Optional[Any] = None,
+        audit_jev: bool = False,
     ) -> None:
         self._retriever = retriever
         self._synthesizer = synthesizer
@@ -229,6 +254,14 @@ class EvaluationHarness:
         self._run_id = run_id or f"eval-{int(time.time())}"
         self._retrieval_only = retrieval_only
         self._retrieval_scorer = RetrievalScorer()
+        self._jev_judge = jev_judge
+        self._audit_jev = audit_jev
+        if self._audit_jev and self._jev_judge is None:
+            try:
+                from rag_core.evaluation.jev_judge import JevJudge
+                self._jev_judge = JevJudge()
+            except Exception as e:
+                logger.warning("Could not initialize JevJudge for audit: %s", e)
 
     def run(
         self,
@@ -371,16 +404,38 @@ class EvaluationHarness:
             base.mrr = ret_eval.mrr
             base.context_recall = ret_eval.context_recall
 
+            contexts = [
+                (c.text if hasattr(c, "text") else c.get("text", ""))
+                for c in chunks
+            ]
+
+            # Dual-Scorer Retrieval Audit: Compare mechanical RetrievalScorer vs semantic JevJudge
+            if self._jev_judge and ground_truth and contexts:
+                sem_verdict = self._jev_judge.evaluate_context_recall(
+                    query=question,
+                    ground_truth=ground_truth,
+                    context="\n\n".join(contexts[:5])
+                )
+                base.semantic_context_recall = sem_verdict.score
+
+                uri_hit = (base.hit_at_5 > 0.0)
+                sem_hit = (base.semantic_context_recall >= 0.70)
+
+                if uri_hit and sem_hit:
+                    base.recall_alignment = "AGREED_HIT"
+                elif not uri_hit and not sem_hit:
+                    base.recall_alignment = "AGREED_MISS"
+                elif sem_hit and not uri_hit:
+                    base.recall_alignment = "URI_FALSE_MISS"
+                else:
+                    base.recall_alignment = "URI_FALSE_HIT"
+
             if self._retrieval_only:
                 base.answer = "[retrieval only]"
                 base.latency_seconds = time.perf_counter() - t_start
                 return base
 
             # 2. Synthesize
-            contexts = [
-                (c.text if hasattr(c, "text") else c.get("text", ""))
-                for c in chunks
-            ]
 
             if self._synthesizer:
                 synthesis = self._synthesizer.synthesize(question, chunks)
@@ -388,7 +443,7 @@ class EvaluationHarness:
             else:
                 answer = "[no synthesizer configured]"
 
-            # 3. RAGAS generation metrics
+            # 3. Generation metrics
             if self._ragas_evaluator and contexts and answer:
                 metrics = self._ragas_evaluator.evaluate(
                     question=question,
@@ -401,6 +456,19 @@ class EvaluationHarness:
                 base.context_precision = metrics.get("context_precision", 0.0)
                 if not ground_truth_chunks:
                     base.context_recall = metrics.get("context_recall", 0.0)
+            elif answer and contexts:
+                from rag_core.observability.trace_evaluators import (
+                    compute_faithfulness,
+                    compute_answer_relevancy,
+                    compute_context_precision,
+                    compute_context_recall,
+                )
+                is_ref = getattr(base, "is_refusal", False) or "اطلاعات کافی برای پاسخ" in answer
+                base.faithfulness = compute_faithfulness(answer=answer, chunks=chunks, is_refusal=is_ref)
+                base.answer_relevancy = compute_answer_relevancy(query=question, answer=answer, is_refusal=is_ref)
+                base.context_precision = compute_context_precision(query=question, chunks=chunks)
+                if not ground_truth_chunks:
+                    base.context_recall = compute_context_recall(query=question, chunks=chunks)
             else:
                 base.faithfulness = 0.0
                 base.answer_relevancy = 0.0
@@ -460,7 +528,15 @@ class EvaluationHarness:
             }
 
         adv_items = [r for r in successful if r.suite == "adversarial_refusal"]
-        adv_refusal_rate = (sum(1.0 for r in adv_items if r.is_refusal) / len(adv_items)) if adv_items else 1.0
+        adv_refusal_rate = (sum(1.0 for r in adv_items if r.is_refusal) / len(adv_items)) if adv_items else 0.0
+
+        alignment_counts: Dict[str, int] = {}
+        for r in successful:
+            if r.recall_alignment != "N/A":
+                alignment_counts[r.recall_alignment] = alignment_counts.get(r.recall_alignment, 0) + 1
+
+        sem_recalls = [r.semantic_context_recall for r in successful if r.recall_alignment != "N/A"]
+        mean_sem_recall = mean(sem_recalls) if sem_recalls else 0.0
 
         return EvaluationReport(
             run_id=self._run_id,
@@ -469,6 +545,7 @@ class EvaluationHarness:
             mean_answer_relevancy=mean([r.answer_relevancy for r in successful]),
             mean_context_precision=mean([r.context_precision for r in successful]),
             mean_context_recall=mean([r.context_recall for r in successful]),
+            mean_semantic_context_recall=mean_sem_recall,
             mean_hit_at_1=mean([r.hit_at_1 for r in successful]),
             mean_hit_at_3=mean([r.hit_at_3 for r in successful]),
             mean_hit_at_5=mean([r.hit_at_5 for r in successful]),
@@ -482,6 +559,7 @@ class EvaluationHarness:
             mean_latency_seconds=mean([r.latency_seconds for r in results]),
             items=results,
             suite_breakdown=suite_breakdown,
+            alignment_summary=alignment_counts,
         )
 
     @staticmethod
