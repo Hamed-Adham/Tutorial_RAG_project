@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 
 from rag_core.config import settings
 from rag_core.naive.chunker import Chunk
@@ -159,24 +159,33 @@ class QdrantRetriever:
         self,
         query: str,
         top_k: int = 3,
-        filter_source_type: Optional[str] = None
+        filter_source_type: Optional[str] = None,
+        filter_chapters: Optional[List[int]] = None
     ) -> List[Tuple[Chunk, float]]:
         """
         Embed query and retrieve top_k most similar chunks from Qdrant with cosine similarity.
+        Supports native pre-filtering by source_type and chapter list.
         """
         query_vec = self.embedder.embed_query(query)
         vector_list = query_vec.tolist() if isinstance(query_vec, np.ndarray) else list(query_vec)
 
-        query_filter = None
+        must_conditions = []
         if filter_source_type:
-            query_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="source_type",
-                        match=MatchValue(value=filter_source_type)
-                    )
-                ]
+            must_conditions.append(
+                FieldCondition(
+                    key="source_type",
+                    match=MatchValue(value=filter_source_type)
+                )
             )
+        if filter_chapters:
+            must_conditions.append(
+                FieldCondition(
+                    key="chapter",
+                    match=MatchAny(any=filter_chapters)
+                )
+            )
+
+        query_filter = Filter(must=must_conditions) if must_conditions else None
 
         response = self.client.query_points(
             collection_name=self.collection_name,
@@ -189,13 +198,17 @@ class QdrantRetriever:
         results: List[Tuple[Chunk, float]] = []
         for pt in response.points:
             p = pt.payload or {}
+            meta = dict(p.get("metadata", {}) or {})
+            for k in ("breadcrumbs", "chapter", "page", "section_id", "token_count"):
+                if k in p and k not in meta:
+                    meta[k] = p[k]
             chunk = Chunk(
                 chunk_id=p.get("chunk_id", str(pt.id)),
                 doc_id=p.get("doc_id", ""),
                 text=p.get("text", ""),
                 source_type=p.get("source_type", "unknown"),
                 source_name=p.get("source_name", "unknown"),
-                metadata=p.get("metadata", {})
+                metadata=meta
             )
             score = float(pt.score) if pt.score is not None else 0.0
             results.append((chunk, score))

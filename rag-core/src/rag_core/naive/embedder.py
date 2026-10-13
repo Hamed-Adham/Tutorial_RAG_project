@@ -95,10 +95,12 @@ class BgeM3Embedder:
             self._device = "cpu"
 
         # Attempt sentence_transformers first
+        from pathlib import Path
+        model_target = self.local_model_path if (self.local_model_path and Path(self.local_model_path).exists()) else "BAAI/bge-m3"
         try:
             from sentence_transformers import SentenceTransformer
-            print(f"Loading local BGE-M3 from {self.local_model_path} on {self._device}...")
-            self._local_model = SentenceTransformer(self.local_model_path, device=self._device)
+            print(f"Loading local BGE-M3 from {model_target} on {self._device}...")
+            self._local_model = SentenceTransformer(model_target, device=self._device)
             return
         except ImportError:
             pass
@@ -107,14 +109,14 @@ class BgeM3Embedder:
         try:
             import torch
             from transformers import AutoTokenizer, AutoModel
-            print(f"Loading local BGE-M3 via transformers on {self._device}...")
-            self._tokenizer = AutoTokenizer.from_pretrained(self.local_model_path)
-            self._hf_model = AutoModel.from_pretrained(self.local_model_path).to(self._device)
+            print(f"Loading local BGE-M3 via transformers ({model_target}) on {self._device}...")
+            self._tokenizer = AutoTokenizer.from_pretrained(model_target)
+            self._hf_model = AutoModel.from_pretrained(model_target).to(self._device)
             self._hf_model.eval()
             self._local_model = "transformers"
             return
         except Exception as e:
-            raise RuntimeError(f"Could not load local BGE-M3 model from {self.local_model_path}: {e}")
+            raise RuntimeError(f"Could not load local BGE-M3 model from {model_target}: {e}")
 
     def embed_documents(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
         """Embed a list of text documents into dense vectors (API first, local fallback)."""
