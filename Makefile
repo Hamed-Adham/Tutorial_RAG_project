@@ -1,4 +1,4 @@
-.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy eval-science-advanced build-bm25 index-science-qdrant kg-status build up down clean
+.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy eval-science-advanced build-bm25 index-science-qdrant kg-status build up down clean serve load-test
 
 PYTHON := .venv/bin/python
 PYTHONPATH := rag-core/src
@@ -94,6 +94,12 @@ index-science-qdrant:
 
 eval-science-advanced:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval --pipeline advanced --suite science_textbook
+
+serve:
+	PYTHONPATH=$(PYTHONPATH):backend $(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+load-test:
+	PYTHONPATH=$(PYTHONPATH):backend $(PYTHON) backend/tests/load/run_load_test.py 50 --mock
 
 
 # ── Codebase Knowledge Graph ─────────────────────────────────────────────────
