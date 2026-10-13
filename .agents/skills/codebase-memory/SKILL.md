@@ -50,24 +50,28 @@ file before ending your session. It is the living map of the project.
     chunking/hierarchical.py, parent_child.py, semantic.py, contextual.py
 
 ### Stage 4 — Indexing
-    indexing/embeddings.py, vector_store.py, bm25_index.py, graphrag.py, indexer.py
+    indexing/embeddings.py, vector_store.py, bm25_index.py, graphrag.py, indexer.py, science_schema.py, build_science_bm25.py, index_science_qdrant.py
 
 ### Stage 5 — Query Understanding
     query/rewriting.py, expansion.py, hyde.py, decomposition.py, routing.py
     query/jev_router.py   <- PRIMARY routing via TypeSafe Jev
+    query/gated_rewriter.py <- Flag-driven 4-mode Jev query transformation engine
 
 ### Stage 6 — Retrieval
-    retrieval/dense.py, bm25.py, graph_local.py, outliers.py
+    retrieval/dense.py, bm25.py, hybrid.py, graph_local.py, outliers.py
 
 ### Stage 7 — Fusion & Reranking
     fusion/rrf.py, reranker.py, jev_reranker.py, capper.py
     jev_reranker.py does single-call batch scoring via Jev.
+    reranker.py does cross-encoder neural reranking (BAAI/bge-reranker-v2-m3).
 
 ### Stage 8 — Post-processing
     postprocessing/expansion.py, compression.py, reorder.py, citations.py
 
-### Stage 9 — Generation & Agent
+### Stage 9 — Generation & Enterprise Orchestrator
     generation/llm.py, prompts.py, synthesizer.py
+    pipeline.py              # AdvancedRAGPipeline (Enterprise Science Engine)
+    contracts.py             # Interfaces (IBM25Retriever, IRRFFusion, ICrossEncoderReranker, IAdvancedRAGPipeline)
     agents/agent.py + tools/{rag_tool.py, graph_tool.py, web_tool.py}
 
 ### Stage 9 — LangGraph Pipeline  <-- CANONICAL EXECUTION ENGINE
@@ -83,10 +87,25 @@ file before ending your session. It is the living map of the project.
     ├── jev_client.py        # Jev API client
     ├── rubrics.py           # 5-part Persian CoT rubrics
     ├── ragas_adapter.py     # RAGAS metric bindings
-    ├── harness.py           # EvaluationHarness
+    ├── harness.py           # EvaluationHarness (dual-scorer audit: Jev vs URI)
     ├── meta_eval.py         # Confusion matrix + Pass^k
     ├── quality_gate.py      # Pass/fail threshold validator
     ├── baseline_manager.py  # Baseline snapshots + drift detection
+    ├── retrieval_scorer.py  # Approach 2 OCR-tolerant retrieval scorer
+    ├── build_standardized_benchmarks.py  # Master benchmark generator, corpus aligner & Step 7 validator
+    ├── migrate_datasets_to_langfuse.py   # Cloud dataset migration with virtual subfolder hierarchy
+    ├── langfuse_dataset.py  # Sync to Langfuse Dataset
+    ├── run_eval.py          # Modular eval (--gates-only, --pipeline, --retrieval-only, --audit-jev)
+    ├── run_baseline_eval.py # Full baseline eval runner  [EDIT HERE]
+    ├── baselines/           # Saved JSON reports
+    └── datasets/
+        ├── golden_set.jsonl # 110-item benchmark (81 dev / 29 test across 4 suites)
+        ├── suites/          # Master CSV suites (input, expected_output, metadata)
+        ├── dev/ & test/     # Partitioned CSV splits
+        └── langfuse/        # Mirror for cloud dataset virtual namespaces
+
+### Stage 10 — Observability
+    observability/langfuse.py, logging.py, trace_evaluators.py
     ├── build_standardized_benchmarks.py  # Master benchmark generator, corpus aligner & Step 7 validator
     ├── migrate_datasets_to_langfuse.py   # Cloud dataset migration with virtual subfolder hierarchy
     ├── langfuse_dataset.py  # Sync to Langfuse Dataset

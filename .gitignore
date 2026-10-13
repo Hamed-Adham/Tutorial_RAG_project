@@ -46,3 +46,4 @@ htmlcov/
 # Local Vector & Model Stores
 data_index/
 *.sqlite3
+chat_export.txt
