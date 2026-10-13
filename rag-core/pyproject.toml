@@ -27,7 +27,10 @@ dependencies = [
     "structlog>=24.1.0",
     "datasets>=2.19.0",
     "pandas>=2.2.0",
-    "numpy>=1.26.0"
+    "numpy>=1.26.0",
+    "rank-bm25>=0.2.2",
+    "hazm>=0.10.0",
+    "sentence-transformers>=3.0.0"
 ]
 
 [project.optional-dependencies]
