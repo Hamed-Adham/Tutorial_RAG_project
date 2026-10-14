@@ -115,5 +115,168 @@ class TestDecoupledRetrievalScorer(unittest.TestCase):
         self.assertEqual(data["retrieval_metrics"]["hit_at_1"], 0.75)
 
 
+class TestDecoupledDiagnosticMatrix(unittest.TestCase):
+    """Unit tests for Feature 007 US4: 2x2 Decoupled Confusion Matrix."""
+
+    def setUp(self):
+        from rag_core.evaluation.decoupled_eval import DecoupledEvaluator
+        self.evaluator = DecoupledEvaluator(hit_k=3, faithfulness_threshold=0.7)
+
+    def _make_item(self, item_id: str, expected_behavior: str = "answer", gold_chunks=None):
+        from rag_core.evaluation.benchmark_schema import BenchmarkItem, SuiteType, DifficultyLevel, SplitType
+        return BenchmarkItem(
+            item_id=item_id,
+            suite=SuiteType.SCIENCE_CURRICULUM if expected_behavior != "refusal" else SuiteType.ADVERSARIAL_REFUSAL,
+            split=SplitType.DEV,
+            difficulty=DifficultyLevel.MEDIUM,
+            query="آوندها در گیاهان چه نقشی دارند؟",
+            ground_truth="انتقال آب و مواد غذایی" if expected_behavior != "refusal" else "اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد",
+            expected_route="science_textbook" if expected_behavior != "refusal" else "refuse",
+            expected_behavior=expected_behavior,
+            gold_chunk_ids=gold_chunks or (["chunk_bio_01"] if expected_behavior != "refusal" else []),
+            category="biology",
+        )
+
+    def test_quadrant_true_positive(self):
+        """Retrieval Hit + Faithful Generation -> True Positive."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+        from rag_core.evaluation.benchmark_schema import SubQJudgeVerdict
+
+        item = self._make_item("item-tp", "answer", ["chunk_bio_01"])
+        retrieved = ["chunk_bio_01", "chunk_other_02"]
+        answer = "آوندها وظیفه انتقال آب و مواد معدنی را در گیاه بر عهده دارند."
+        verdict = SubQJudgeVerdict(
+            metric_name="faithfulness",
+            verdict=1,
+            score=0.95,
+            confidence=0.99,
+            thought="Fully grounded in retrieved chunk.",
+            latency_seconds=0.3,
+        )
+
+        res = self.evaluator.classify_item(item, retrieved, answer, verdict)
+        self.assertEqual(res.quadrant, DiagnosticQuadrant.TRUE_POSITIVE)
+        self.assertEqual(res.retrieval_hit, 1)
+        self.assertEqual(res.synthesis_passed, 1)
+
+    def test_quadrant_false_positive_hallucination(self):
+        """Retrieval Hit + Unfaithful Generation -> False Positive."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+        from rag_core.evaluation.benchmark_schema import SubQJudgeVerdict
+
+        item = self._make_item("item-fp", "answer", ["chunk_bio_01"])
+        retrieved = ["chunk_bio_01"]
+        answer = "آوندها سلول‌های عصبی هستند که تفکر گیاه را کنترل می‌کنند."
+        verdict = SubQJudgeVerdict(
+            metric_name="faithfulness",
+            verdict=0,
+            score=0.1,
+            confidence=0.95,
+            thought="Completely fabricated information.",
+            latency_seconds=0.25,
+        )
+
+        res = self.evaluator.classify_item(item, retrieved, answer, verdict)
+        self.assertEqual(res.quadrant, DiagnosticQuadrant.FALSE_POSITIVE)
+        self.assertEqual(res.retrieval_hit, 1)
+        self.assertEqual(res.synthesis_passed, 0)
+
+    def test_quadrant_false_negative_missed_retrieval(self):
+        """Retrieval Miss + Ungrounded synthesis attempt -> False Negative."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+
+        item = self._make_item("item-fn", "answer", ["chunk_bio_01"])
+        retrieved = ["chunk_irrelevant_99"]
+        answer = "آوندها احتمالا لوله‌های باریکی هستند."
+
+        res = self.evaluator.classify_item(item, retrieved, answer)
+        self.assertEqual(res.quadrant, DiagnosticQuadrant.FALSE_NEGATIVE)
+        self.assertEqual(res.retrieval_hit, 0)
+        self.assertEqual(res.synthesis_passed, 0)
+
+    def test_quadrant_true_negative_adversarial_refusal(self):
+        """Adversarial Query + Clean Refusal -> True Negative."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+
+        item = self._make_item("item-tn-adv", "refusal", [])
+        retrieved = []
+        answer = "اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد."
+
+        res = self.evaluator.classify_item(item, retrieved, answer)
+        self.assertEqual(res.quadrant, DiagnosticQuadrant.TRUE_NEGATIVE)
+        self.assertEqual(res.is_refusal, True)
+        self.assertEqual(res.synthesis_passed, 1)
+
+    def test_quadrant_true_negative_retrieval_miss_safe_refusal(self):
+        """In-domain Query + Retrieval Miss + Safe Refusal -> True Negative."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+
+        item = self._make_item("item-tn-miss", "answer", ["chunk_bio_01"])
+        retrieved = ["chunk_unrelated"]
+        answer = "اطلاعاتی در مورد این موضوع در اسناد یافت نشد."
+
+        res = self.evaluator.classify_item(item, retrieved, answer)
+        self.assertEqual(res.quadrant, DiagnosticQuadrant.TRUE_NEGATIVE)
+        self.assertEqual(res.retrieval_hit, 0)
+        self.assertEqual(res.is_refusal, True)
+
+    def test_confusion_matrix_derived_metrics(self):
+        """Verify Hallucination Catch Rate = TN / (TN + FP) and Retrieval Coverage."""
+        from rag_core.evaluation.benchmark_schema import ConfusionMatrixResult
+
+        # Case 1: Standard distribution
+        # TP = 60, FP = 10, FN = 15, TN = 15
+        # Total = 100
+        # Hallucination Catch Rate = TN / (TN + FP) = 15 / (15 + 10) = 15 / 25 = 0.60
+        # Retrieval Coverage = (TP + FP) / Total = 70 / 100 = 0.70
+        matrix = ConfusionMatrixResult(
+            true_positive=60,
+            false_positive=10,
+            false_negative=15,
+            true_negative=15,
+        )
+        self.assertEqual(matrix.total, 100)
+        self.assertAlmostEqual(matrix.hallucination_catch_rate, 0.60, places=4)
+        self.assertAlmostEqual(matrix.retrieval_coverage, 0.70, places=4)
+
+    def test_batch_evaluation(self):
+        """Verify batch processing produces exact aggregate confusion matrix."""
+        from rag_core.evaluation.decoupled_eval import DiagnosticQuadrant
+
+        items = [
+            self._make_item("1", "answer", ["c1"]),
+            self._make_item("2", "answer", ["c2"]),
+            self._make_item("3", "refusal", []),
+            self._make_item("4", "answer", ["c4"]),
+        ]
+        retrieved_list = [
+            ["c1"],              # Hit -> TP
+            ["c2"],              # Hit but answer is ungrounded -> FP
+            [],                  # Refusal clean -> TN
+            ["irrelevant"],      # Miss + no refusal -> FN
+        ]
+        answers = [
+            "پاسخ درست با انتقال آب و مواد غذایی",
+            "پاسخ کاملا نامرتبط و اشتباه",
+            "اطلاعات مربوط به این پرسش در مستندات موجود نمی‌باشد",
+            "پاسخ حدسی بدون استناد",
+        ]
+
+        matrix, details = self.evaluator.evaluate_batch(
+            items=items,
+            retrieved_chunk_ids_list=retrieved_list,
+            generated_answers=answers,
+        )
+
+        self.assertEqual(matrix.true_positive, 1)
+        self.assertEqual(matrix.false_positive, 1)
+        self.assertEqual(matrix.true_negative, 1)
+        self.assertEqual(matrix.false_negative, 1)
+        self.assertEqual(matrix.total, 4)
+        self.assertAlmostEqual(matrix.hallucination_catch_rate, 0.5, places=4)
+        self.assertAlmostEqual(matrix.retrieval_coverage, 0.5, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()
+

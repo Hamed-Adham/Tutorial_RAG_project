@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SubQJudgeContract",
+  "description": "Request and response protocol contract for SubQ Decisions System One API Judge",
+  "type": "object",
+  "definitions": {
+    "JudgeRequest": {
+      "type": "object",
+      "required": ["state", "questions"],
+      "properties": {
+        "model": {
+          "type": "string",
+          "default": "subq-snap-preview"
+        },
+        "state": {
+          "type": "object",
+          "required": ["user_query", "agent_response"],
+          "properties": {
+            "user_query": { "type": "string" },
+            "agent_response": { "type": "string" },
+            "retrieved_context": { "type": "string" },
+            "ground_truth": { "type": "string" },
+            "citations": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "questions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["type", "instructions", "criteria"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["choice", "noul", "score"]
+              },
+              "instructions": { "type": "string" },
+              "criteria": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "JudgeResponse": {
+      "type": "object",
+      "required": ["answers"],
+      "properties": {
+        "answers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["choice"],
+            "properties": {
+              "choice": { "type": "string" },
+              "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+              "score": { "type": "number" },
+              "thought": { "type": "string" }
+            }
+          }
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "prompt_tokens": { "type": "integer" },
+            "completion_tokens": { "type": "integer" },
+            "total_tokens": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

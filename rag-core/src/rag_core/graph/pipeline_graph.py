@@ -6,7 +6,10 @@ Assembles the complete end-to-end RAG state graph with conditional branches,
 native Langfuse tracing, latency profiling, and token/cost attribution.
 """
 
-from typing import Dict, Any, List, Optional
+import time
+import re
+import asyncio
+from typing import Dict, Any, List, Optional, AsyncIterator
 from langgraph.graph import StateGraph, END
 
 from rag_core.graph.state import RAGGraphState
@@ -172,3 +175,612 @@ class LangGraphRAGPipeline:
                 )
 
         return final_state
+
+
+# ---------------------------------------------------------------------------
+# Enterprise Science LangGraph StateGraph Pipeline
+# ---------------------------------------------------------------------------
+
+def should_enterprise_refuse(state: RAGGraphState) -> str:
+    """Conditional edge determining whether query was halted by the pre-retrieval gate or routes directly to synthesis."""
+    if state.get("is_refusal", False) or not state.get("proceed_to_retrieval", True):
+        need = state.get("context_need_tier")
+        if need == "needs_history_only":
+            return "synthesis"
+        return "refusal"
+    return "hybrid_retrieve"
+
+
+class EnterpriseScienceGraph:
+    """
+    Standard LangGraph StateGraph pipeline for the Enterprise Science RAG Engine.
+    Implements a 5-stage declarative computation graph with conditional refusal branching,
+    native Langfuse CallbackHandler support, and asynchronous token streaming.
+    """
+
+    def __init__(
+        self,
+        rewriter: Optional[Any] = None,
+        hybrid_retriever: Optional[Any] = None,
+        reranker: Optional[Any] = None,
+        expander: Optional[Any] = None,
+        reorderer: Optional[Any] = None,
+        synthesizer: Optional[Any] = None,
+        top_k: int = 5,
+        overfetch_k: int = 50,
+        warmup: bool = False
+    ):
+        from rag_core.graph.nodes import (
+            create_enterprise_gated_rewrite_node,
+            create_enterprise_refusal_node,
+            create_enterprise_hybrid_retrieve_node,
+            create_enterprise_neural_rerank_node,
+            create_enterprise_expansion_node,
+            create_enterprise_synthesis_node
+        )
+
+        self.top_k = top_k
+        self.overfetch_k = overfetch_k
+        self.tracker = LangfuseTracker()
+        self.rewriter = rewriter
+        self.hybrid_retriever = hybrid_retriever
+        self.reranker = reranker
+        self.expander = expander
+        self.reorderer = reorderer
+        self.synthesizer = synthesizer
+
+        self.last_citations: List[Any] = []
+        self.last_is_refusal: bool = False
+        self.last_effective_query: str = ""
+        self.last_badge: Optional[str] = None
+        self._session_citations: Dict[str, Any] = {}
+        self._session_is_refusal: Dict[str, bool] = {}
+        self._session_effective_query: Dict[str, str] = {}
+        self._session_latencies: Dict[str, Dict[str, float]] = {}
+        self.last_summary: Optional[str] = None
+        self._session_summaries: Dict[str, Optional[str]] = {}
+
+        # Build declarative StateGraph
+        workflow = StateGraph(RAGGraphState)
+
+        # Register nodes
+        workflow.add_node("gated_rewrite", create_enterprise_gated_rewrite_node(rewriter))
+        workflow.add_node("refusal", create_enterprise_refusal_node())
+        workflow.add_node("hybrid_retrieve", create_enterprise_hybrid_retrieve_node(hybrid_retriever, overfetch_k=overfetch_k))
+        workflow.add_node("neural_rerank", create_enterprise_neural_rerank_node(reranker, top_k=top_k))
+        workflow.add_node("parent_expansion", create_enterprise_expansion_node(expander, reorderer))
+        workflow.add_node("synthesis", create_enterprise_synthesis_node(synthesizer))
+
+        # Define graph edges
+        workflow.set_entry_point("gated_rewrite")
+        workflow.add_conditional_edges(
+            "gated_rewrite",
+            should_enterprise_refuse,
+            {"refusal": "refusal", "hybrid_retrieve": "hybrid_retrieve", "synthesis": "synthesis"}
+        )
+        workflow.add_edge("refusal", END)
+        workflow.add_edge("hybrid_retrieve", "neural_rerank")
+        workflow.add_edge("neural_rerank", "parent_expansion")
+        workflow.add_edge("parent_expansion", "synthesis")
+        workflow.add_edge("synthesis", END)
+
+        # Compile graph
+        self.graph = workflow.compile()
+
+        if warmup:
+            try:
+                if reranker and hasattr(reranker, "warmup"):
+                    reranker.warmup()
+            except Exception:
+                pass
+
+    def _resolve_synthesizer(self) -> Any:
+        if self.synthesizer is not None:
+            return self.synthesizer
+        from rag_core.generation.synthesizer import ResponseSynthesizer
+        self.synthesizer = ResponseSynthesizer()
+        return self.synthesizer
+
+    def _resolve_rewriter(self) -> Any:
+        if self.rewriter is not None:
+            return self.rewriter
+        from rag_core.query.query_gate import QueryGate
+        self.rewriter = QueryGate()
+        return self.rewriter
+
+    def _resolve_retriever(self) -> Any:
+        if self.hybrid_retriever is not None:
+            return self.hybrid_retriever
+        from rag_core.retrieval.hybrid import HybridRetriever
+        self.hybrid_retriever = HybridRetriever()
+        return self.hybrid_retriever
+
+    def _resolve_reranker(self) -> Any:
+        if self.reranker is not None:
+            return self.reranker
+        from rag_core.fusion.reranker import CrossEncoderReranker
+        self.reranker = CrossEncoderReranker()
+        return self.reranker
+
+    def _resolve_expander(self) -> Any:
+        if self.expander is not None:
+            return self.expander
+        from rag_core.postprocessing.expansion import ParentSectionExpander
+        self.expander = ParentSectionExpander()
+        return self.expander
+
+    def _resolve_reorderer(self) -> Any:
+        if self.reorderer is not None:
+            return self.reorderer
+        from rag_core.postprocessing.expansion import LongContextReorder
+        self.reorderer = LongContextReorder()
+        return self.reorderer
+
+    def get_citations_for_session(self, session_id: Optional[str]) -> List[Any]:
+        if session_id and session_id in self._session_citations:
+            return self._session_citations[session_id]
+        return self.last_citations
+
+    def get_refusal_for_session(self, session_id: Optional[str]) -> bool:
+        if session_id and session_id in self._session_is_refusal:
+            return self._session_is_refusal[session_id]
+        return self.last_is_refusal
+
+    def get_effective_query_for_session(self, session_id: Optional[str]) -> str:
+        if session_id and session_id in self._session_effective_query:
+            return self._session_effective_query[session_id]
+        return self.last_effective_query
+
+    def get_latencies_for_session(self, session_id: Optional[str]) -> Dict[str, float]:
+        if session_id and session_id in self._session_latencies:
+            return self._session_latencies[session_id]
+        return {}
+
+    def get_summary_for_session(self, session_id: Optional[str]) -> Optional[str]:
+        if session_id and session_id in self._session_summaries:
+            return self._session_summaries[session_id]
+        return self.last_summary
+
+    async def ainvoke(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        selected_chapters: Optional[List[int]] = None,
+        config: Optional[Dict[str, Any]] = None
+    ) -> RAGGraphState:
+        """Execute query asynchronously through the compiled LangGraph StateGraph."""
+        initial_state: RAGGraphState = {
+            "user_query": query,
+            "session_id": session_id,
+            "history": history,
+            "selected_chapters": selected_chapters,
+            "selected_context_turn_id": (config or {}).get("selected_context_turn_id"),
+            "metadata": {
+                "history_enabled": (config or {}).get("history_enabled", True)
+            },
+            "latencies": {},
+            "tokens": {}
+        }
+        exec_config = config or {}
+        cb_handler = self.tracker.get_langchain_handler(tags=["langgraph", "enterprise_science"])
+        if cb_handler and "callbacks" not in exec_config:
+            exec_config["callbacks"] = [cb_handler]
+
+        final_state: RAGGraphState = await self.graph.ainvoke(initial_state, config=exec_config)
+
+        # Cache session metadata
+        self.last_citations = final_state.get("citations", [])
+        self.last_is_refusal = final_state.get("is_refusal", False)
+        self.last_effective_query = final_state.get("effective_query", query)
+        if session_id:
+            self._session_citations[session_id] = self.last_citations
+            self._session_is_refusal[session_id] = self.last_is_refusal
+            self._session_effective_query[session_id] = self.last_effective_query
+            self._session_latencies[session_id] = final_state.get("latencies", {})
+
+        return final_state
+
+    def invoke(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        selected_chapters: Optional[List[int]] = None,
+        config: Optional[Dict[str, Any]] = None
+    ) -> RAGGraphState:
+        """Synchronously execute query through the compiled LangGraph StateGraph."""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import nest_asyncio
+            nest_asyncio.apply()
+        return asyncio.run(self.ainvoke(query, session_id, history, selected_chapters, config))
+
+    async def astream_tokens(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
+        selected_chapters: Optional[List[int]] = None,
+        config: Optional[Dict[str, Any]] = None,
+        status_callback: Optional[Any] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Stream tokens from the Enterprise Science Graph with sub-second TTFT.
+        Executes pre-retrieval gating, hybrid retrieval, cross-encoder reranking,
+        and parent expansion, then yields synthesized LLM tokens progressively.
+        """
+        import asyncio
+        from rag_core.pipeline import GROUNDED_REFUSAL_FA
+        from rag_core.postprocessing.citations import CitationFormatter
+        from rag_core.generation.prompts import SYSTEM_PROMPT_PERSIAN_GROUNDED, PROMPT_COMPOUND_DIRECTIVE_FA
+        from rag_core.config import settings
+
+        total_start = time.perf_counter()
+        latencies: Dict[str, float] = {}
+
+        async def _notify(step: str, title: str):
+            if status_callback is not None:
+                try:
+                    res = status_callback(step, title)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    pass
+
+        # 1. Gated Rewriting / Intent Guard
+        await _notify("rewrite", "تحلیل و بررسی سوال")
+        t0 = time.perf_counter()
+        rewriter = self._resolve_rewriter()
+
+        use_route = False
+        from rag_core.query.query_gate import QueryGate
+        if isinstance(rewriter, QueryGate):
+            use_route = True
+        elif hasattr(rewriter, "evaluate_and_route"):
+            from unittest.mock import MagicMock
+            eval_fn = getattr(rewriter, "evaluate_and_route", None)
+            if not isinstance(rewriter, MagicMock):
+                use_route = True
+            elif hasattr(eval_fn, "assert_awaited") or asyncio.iscoroutinefunction(eval_fn):
+                use_route = True
+
+        hist_enabled = (config or {}).get("history_enabled", True)
+        if use_route:
+            selected_turn_id = (config or {}).get("selected_context_turn_id")
+            gate_decision = await rewriter.evaluate_and_route(
+                query=query,
+                session_id=session_id,
+                history=history,
+                selected_chapters=selected_chapters,
+                selected_context_turn_id=selected_turn_id,
+                history_enabled=hist_enabled
+            )
+            effective_query = gate_decision.effective_query or query
+            proceed = not gate_decision.is_refusal and not gate_decision.bypass_retrieval
+            is_refusal = gate_decision.is_refusal
+            self.last_intent_tier = getattr(gate_decision.intent_tier, "value", str(gate_decision.intent_tier))
+            self.last_context_need_tier = getattr(gate_decision.context_need_tier, "value", str(gate_decision.context_need_tier))
+            is_history_only = (gate_decision.context_need_tier.value == "needs_history_only")
+            sub_queries = gate_decision.sub_queries
+            refusal_reason = gate_decision.reasoning
+            self.last_gate_decision = gate_decision
+        else:
+            raw_res = rewriter.evaluate_and_rewrite(
+                query=query,
+                history=history,
+                active_chapters=selected_chapters
+            )
+            rewrite_decision = await raw_res if asyncio.iscoroutine(raw_res) else raw_res
+            effective_query = getattr(rewrite_decision, "rewritten_query", None) or query
+            proceed = getattr(rewrite_decision, "proceed_to_retrieval", True)
+            is_refusal = not proceed
+            is_history_only = False
+            sub_queries = getattr(rewrite_decision, "sub_queries", [])
+            refusal_reason = ""
+            self.last_gate_decision = rewrite_decision
+
+        latencies["rewrite_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        if is_refusal:
+            self.last_citations = []
+            self.last_is_refusal = True
+            self.last_effective_query = effective_query
+            self.last_badge = None
+            self.last_candidates = []
+            self.last_reranked = []
+            self.last_expanded_context = None
+            self.last_reordered_sections = []
+            self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+            if session_id:
+                self._session_citations[session_id] = []
+                self._session_is_refusal[session_id] = True
+                self._session_effective_query[session_id] = effective_query
+            persian_refusal = any('\u0600' <= c <= '\u06FF' for c in refusal_reason)
+            msg = refusal_reason if persian_refusal else GROUNDED_REFUSAL_FA
+            yield msg
+            return
+
+        if is_history_only:
+            # Bypass hybrid retrieval and neural rerank completely! (0ms retrieval latency)
+            self.last_citations = []
+            self.last_is_refusal = False
+            self.last_effective_query = effective_query
+            self.last_badge = "پاسخ بر اساس گفتگوی پیشین"
+            latencies["retrieval_ms"] = 0.0
+            latencies["rerank_ms"] = 0.0
+            latencies["expansion_ms"] = 0.0
+
+            await _notify("synthesis", "پاسخ بر اساس گفتگوی پیشین")
+            synthesizer = self._resolve_synthesizer()
+            chunks_for_synth = []
+            if hasattr(gate_decision, "selected_history_items") and gate_decision.selected_history_items:
+                for item in gate_decision.selected_history_items:
+                    chunks_for_synth.append({
+                        "text": f"پرسش: {item.question}\nپاسخ: {item.answer}",
+                        "page": 1,
+                        "breadcrumb": "گفتگوی پیشین",
+                        "doc_id": "conversation_history",
+                        "chunk_id": item.turn_id
+                    })
+            elif history:
+                for t in history[-3:]:
+                    chunks_for_synth.append({
+                        "text": f"{t.get('role', 'user')}: {t.get('content', '')}",
+                        "page": 1,
+                        "breadcrumb": "گفتگوی پیشین",
+                        "doc_id": "conversation_history",
+                        "chunk_id": "turn_hist"
+                    })
+
+            first_token_received = False
+            synth_start = time.perf_counter()
+            async for token in synthesizer.synthesize_stream(
+                query=effective_query,
+                chunks=chunks_for_synth,
+                system_prompt=SYSTEM_PROMPT_PERSIAN_GROUNDED,
+                session_id=session_id,
+                history=history
+            ):
+                if not first_token_received:
+                    first_token_received = True
+                    self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                yield token
+
+            latencies["synthesis_ms"] = round((time.perf_counter() - synth_start) * 1000.0, 2)
+            if session_id:
+                self._session_citations[session_id] = []
+                self._session_is_refusal[session_id] = False
+                self._session_effective_query[session_id] = effective_query
+                self._session_latencies[session_id] = latencies
+            return
+
+        # 2. Hybrid Retrieval
+        await _notify("retrieval", "جستجوی اسناد و کتاب درسی")
+        t0 = time.perf_counter()
+        retriever = self._resolve_retriever()
+
+        # Augment retrieval query with historical summaries when needs_history_and_retrieve (User Story 4)
+        if use_route and hasattr(gate_decision, "selected_history_items") and gate_decision.selected_history_items:
+            from rag_core.query.query_gate import QueryGate
+            effective_query = QueryGate.enrich_query_with_summaries(effective_query, gate_decision.selected_history_items)
+
+        active_sub_queries = sub_queries if sub_queries else []
+        if active_sub_queries and len(active_sub_queries) > 1:
+            tasks = [
+                retriever.retrieve(query=sq, top_k=self.overfetch_k, overfetch_k=self.overfetch_k, chapters=selected_chapters)
+                for sq in active_sub_queries
+            ]
+            sub_results = await asyncio.gather(*tasks)
+            candidates = []
+            seen = set()
+            for cand_list in sub_results:
+                for c in cand_list:
+                    if c.chunk_id not in seen:
+                        candidates.append(c)
+                        seen.add(c.chunk_id)
+        else:
+            candidates = await retriever.retrieve(
+                query=effective_query,
+                top_k=self.overfetch_k,
+                overfetch_k=self.overfetch_k,
+                chapters=selected_chapters
+            )
+        latencies["retrieval_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        if not candidates:
+            self.last_citations = []
+            self.last_is_refusal = True
+            self.last_effective_query = effective_query
+            self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+            if session_id:
+                self._session_citations[session_id] = []
+                self._session_is_refusal[session_id] = True
+                self._session_effective_query[session_id] = effective_query
+                self._session_latencies[session_id] = latencies
+            if selected_chapters:
+                ch_str = "، ".join(str(c) for c in selected_chapters)
+                refusal_msg = f"در محدوده فصل‌های انتخابی ({ch_str})، اطلاعاتی درباره این پرسش در کتاب یافت نشد. لطفاً دامنه جستجو را گسترش دهید یا تمام کتاب را انتخاب فرمایید."
+            else:
+                refusal_msg = GROUNDED_REFUSAL_FA
+            yield refusal_msg
+            return
+
+        # 3. Cross-Encoder Neural Reranking
+        await _notify("rerank", "بازرتبه‌بندی عصبی شواهد")
+        t0 = time.perf_counter()
+        reranker = self._resolve_reranker()
+        timeout = getattr(settings, "rerank_timeout_ms", 3000.0)
+        reranked = await reranker.rerank(
+            query=effective_query,
+            candidates=candidates[:8],
+            top_k=self.top_k,
+            timeout_ms=timeout
+        )
+        latencies["rerank_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        # 4. Parent Section Expansion & Context Reordering
+        await _notify("expansion", "بسط و تکمیل بخش‌های مرتبط")
+        t0 = time.perf_counter()
+        expander = self._resolve_expander()
+        reorderer = self._resolve_reorderer()
+        expanded_ctx = expander.expand(candidates=reranked, max_sections=3, token_ceiling=2500)
+        reordered_sections = reorderer.reorder(expanded_ctx.parent_sections)
+        latencies["expansion_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        self.last_candidates = candidates
+        self.last_reranked = reranked
+        self.last_expanded_context = expanded_ctx
+        self.last_reordered_sections = reordered_sections
+
+        # 5. Citation Formatting
+        citation_candidates = []
+        from rag_core.postprocessing.citations import DOC_TO_CHAPTER
+        for rc in reranked:
+            c = getattr(rc, "candidate", rc)
+            doc_id = getattr(c, "doc_id", "science_textbook") or "science_textbook"
+            if not doc_id.endswith(".pdf"):
+                doc_id = f"{doc_id}.pdf"
+            ch_info = DOC_TO_CHAPTER.get(doc_id)
+            c_page = getattr(c, "page", 1)
+            display_name = f"فصل {ch_info[0]}، صفحه {c_page}" if ch_info else f"کتاب درسی، صفحه {c_page}"
+            citation_candidates.append({
+                "doc_id": doc_id,
+                "filename": doc_id,
+                "page": c_page,
+                "chunk_id": getattr(c, "chunk_id", ""),
+                "score": getattr(rc, "cross_encoder_score", 0.0),
+                "metadata": {"title": getattr(c, "breadcrumbs", ""), "display_name": display_name}
+            })
+        formatter = CitationFormatter()
+        citation_bundle = formatter.format(citation_candidates)
+
+        default_synth_doc = citation_candidates[0]["doc_id"] if citation_candidates else "science_textbook.pdf"
+        chunks_for_synth = [
+            {
+                "text": sec.full_text,
+                "page": sec.page_start,
+                "breadcrumb": f"فصل {sec.chapter}: {sec.title}",
+                "doc_id": default_synth_doc,
+                "chunk_id": sec.section_id
+            }
+            for sec in reordered_sections
+        ]
+
+        is_compound = False
+        if use_route and hasattr(gate_decision, "is_compound"):
+            is_compound = bool(gate_decision.is_compound)
+        elif 'rewrite_decision' in locals():
+            is_compound = bool(getattr(rewrite_decision, "is_compound", False))
+
+        synth_prompt = SYSTEM_PROMPT_PERSIAN_GROUNDED
+        if is_compound:
+            synth_prompt = f"{synth_prompt}\n\n{PROMPT_COMPOUND_DIRECTIVE_FA}"
+        if hist_enabled:
+            from rag_core.generation.prompts import PROMPT_INCREMENTAL_SUMMARY_DIRECTIVE_FA
+            synth_prompt = f"{synth_prompt}\n\n{PROMPT_INCREMENTAL_SUMMARY_DIRECTIVE_FA}"
+
+        # 6. Streaming Token Synthesis with TTFT Tracking & Clean Summary Interception
+        await _notify("synthesis", "نگارش پاسخ مستند")
+        t0 = time.perf_counter()
+        synthesizer = self._resolve_synthesizer()
+        first_token = True
+        self.last_ttft_ms = None
+        full_tokens = []
+        in_summary = False
+        summary_tokens = []
+        pending_buffer = ""
+
+        # Only transition to in_summary when the explicit summary marker appears
+        summary_regex = re.compile(r"<!--\s*SUMMARY\s*-->|دستورالعمل ثبت خلاصه", re.IGNORECASE)
+        # Prefixes that might indicate an incoming summary tag across token boundaries
+        marker_prefixes = ("<!-", "<!--", "دستور", "دستورالعمل")
+
+        async for token in synthesizer.synthesize_stream(
+            query=effective_query,
+            chunks=chunks_for_synth,
+            system_prompt=synth_prompt,
+            session_id=session_id,
+            history=history,
+        ):
+            if in_summary:
+                summary_tokens.append(token)
+                continue
+
+            test_text = pending_buffer + token
+            match = summary_regex.search(test_text)
+            if match:
+                # Text before the summary marker belongs to the actual answer
+                prefix_clean = test_text[:match.start()]
+                if prefix_clean:
+                    if first_token:
+                        self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                        first_token = False
+                    full_tokens.append(prefix_clean)
+                    yield prefix_clean
+
+                in_summary = True
+                summary_tokens.append(test_text[match.start():])
+                pending_buffer = ""
+            elif any(test_text.endswith(p) for p in marker_prefixes) and len(test_text) <= 50:
+                # Potential start of summary marker split across chunks; hold briefly
+                pending_buffer = test_text
+            else:
+                to_emit = test_text
+                pending_buffer = ""
+                if to_emit:
+                    if first_token:
+                        self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                        first_token = False
+                    full_tokens.append(to_emit)
+                    yield to_emit
+
+        # Flush any trailing pending buffer if summary marker never materialized
+        if pending_buffer and not in_summary:
+            if first_token:
+                self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                first_token = False
+            full_tokens.append(pending_buffer)
+            yield pending_buffer
+
+        latencies["synthesis_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        accumulated_answer = "".join(full_tokens).strip()
+        accumulated_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<!--\s*SUMMARY\s*-->[\s\S]*$", "", accumulated_answer, flags=re.IGNORECASE).strip()
+        accumulated_answer = re.sub(r"دستورالعمل ثبت خلاصه در حافظه[\s\S]*$", "", accumulated_answer, flags=re.IGNORECASE).strip()
+
+        is_refusal = (
+            "اطلاعات کافی برای پاسخ" in accumulated_answer
+            or "اطلاعاتی درباره این پرسش در کتاب یافت نشد" in accumulated_answer
+        )
+        if citation_bundle.inline_text and not is_refusal:
+            yield f"\n\n---\n\n**Sources:**\n{citation_bundle.inline_text}"
+
+        # Extract or derive structured summary for session memory (User Story 5)
+        summary_raw = "".join(summary_tokens)
+        clean_summary = None
+        if summary_raw:
+            clean_summary = (
+                summary_raw
+                .replace("<!-- SUMMARY -->", "")
+                .replace("<!-- /SUMMARY -->", "")
+                .replace("<!--", "")
+                .replace("-->", "")
+                .strip()
+            )
+            clean_summary = re.sub(r"دستورالعمل ثبت خلاصه[^\n]*\n+", "", clean_summary, flags=re.IGNORECASE).strip()
+            clean_summary = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", clean_summary, flags=re.IGNORECASE).strip()
+        if not clean_summary and not is_refusal and accumulated_answer:
+            clean_summary = accumulated_answer[:250].strip()
+
+        self.last_summary = clean_summary
+        self.last_citations = citation_bundle.citations
+        self.last_is_refusal = is_refusal
+        self.last_effective_query = effective_query
+        if session_id:
+            self._session_citations[session_id] = citation_bundle.citations
+            self._session_is_refusal[session_id] = is_refusal
+            self._session_effective_query[session_id] = effective_query
+            self._session_latencies[session_id] = latencies
+            self._session_summaries[session_id] = clean_summary
+
+

@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvaluationReportContract",
+  "description": "Standardized schema for exported JSON evaluation benchmark reports",
+  "type": "object",
+  "required": [
+    "report_id",
+    "timestamp",
+    "split_evaluated",
+    "judge_backend",
+    "total_items",
+    "overall_pass_rate",
+    "suite_summaries",
+    "confusion_matrix"
+  ],
+  "properties": {
+    "report_id": { "type": "string" },
+    "timestamp": { "type": "string" },
+    "split_evaluated": { "type": "string", "enum": ["dev", "test"] },
+    "judge_backend": { "type": "string" },
+    "total_items": { "type": "integer" },
+    "overall_pass_rate": { "type": "number" },
+    "baseline_pass_rate": { "type": "number" },
+    "score_delta": { "type": "number" },
+    "mean_latency_seconds": { "type": "number" },
+    "p95_latency_seconds": { "type": "number" },
+    "total_cost_usd": { "type": "number" },
+    "confusion_matrix": {
+      "type": "object",
+      "required": ["true_positive", "false_positive", "false_negative", "true_negative"],
+      "properties": {
+        "true_positive": { "type": "integer" },
+        "false_positive": { "type": "integer" },
+        "false_negative": { "type": "integer" },
+        "true_negative": { "type": "integer" },
+        "hallucination_catch_rate": { "type": "number" },
+        "retrieval_coverage": { "type": "number" }
+      }
+    },
+    "suite_summaries": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["suite", "total_items", "passed_items", "pass_rate"],
+        "properties": {
+          "suite": { "type": "string" },
+          "total_items": { "type": "integer" },
+          "passed_items": { "type": "integer" },
+          "pass_rate": { "type": "number" },
+          "hit_at_1": { "type": "number" },
+          "hit_at_5": { "type": "number" },
+          "mrr": { "type": "number" },
+          "faithfulness": { "type": "number" },
+          "answer_relevancy": { "type": "number" },
+          "mean_latency_seconds": { "type": "number" },
+          "total_tokens": { "type": "integer" }
+        }
+      }
+    },
+    "failing_cases": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}

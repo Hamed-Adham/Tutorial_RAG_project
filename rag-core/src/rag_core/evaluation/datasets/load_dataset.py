@@ -9,7 +9,61 @@ import os
 import json
 from typing import List, Dict, Any, Optional
 
+from rag_core.evaluation.benchmark_schema import BenchmarkItem
+
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "golden_set.jsonl")
+MASTER_DATASET_PATH = os.path.join(os.path.dirname(__file__), "master_golden_set.jsonl")
+
+
+def load_benchmark_items(
+    suite: Optional[str] = None,
+    split: Optional[str] = None,
+    difficulty: Optional[str] = None,
+    dataset_path: Optional[str] = None,
+    limit: Optional[int] = None
+) -> List[BenchmarkItem]:
+    """
+    Load validated BenchmarkItem instances from master_golden_set.jsonl.
+    """
+    path = dataset_path or (MASTER_DATASET_PATH if os.path.exists(MASTER_DATASET_PATH) else DATASET_PATH)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Benchmark dataset not found at {path}")
+
+    items = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            data = json.loads(line)
+            # Normalize keys if needed
+            if "query" not in data and "question" in data:
+                data["query"] = data["question"]
+            if "item_id" not in data and "id" in data:
+                data["item_id"] = data["id"]
+            if "ground_truth" not in data and "expected_output" in data:
+                data["ground_truth"] = data["expected_output"]
+            if "expected_route" not in data:
+                data["expected_route"] = data.get("suite", "science_curriculum")
+
+            s_val = str(data.get("suite", ""))
+            sp_val = str(data.get("split", ""))
+            df_val = str(data.get("difficulty", ""))
+
+            if suite and s_val != suite:
+                continue
+            if split and sp_val != split:
+                continue
+            if difficulty and df_val != difficulty:
+                continue
+
+            item = BenchmarkItem(**data)
+            items.append(item)
+            if limit and len(items) >= limit:
+                break
+
+    return items
+
 
 def load_golden_dataset(
     suite: Optional[str] = None,

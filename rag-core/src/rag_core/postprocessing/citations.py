@@ -86,6 +86,55 @@ class CitationBundle:
 # ---------------------------------------------------------------------------
 
 
+DOC_TO_CHAPTER: Dict[str, Tuple[int, str]] = {
+    "C706_olom_haftom-7-144-2-5.pdf": (1, "تفکر و تجربه"),
+    "C706_olom_haftom-7-144-6-11.pdf": (2, "اندازه‌گیری در علوم و ابزارهای آن"),
+    "C706_olom_haftom-7-144-13-24.pdf": (3, "اتم‌ها، الفبای مواد"),
+    "C706_olom_haftom-7-144-25-34.pdf": (4, "مواد پیرامون ما"),
+    "C706_olom_haftom-7-144-36-47.pdf": (5, "از معدن تا خانه"),
+    "C706_olom_haftom-7-144-48-55.pdf": (6, "سفر آب روی زمین"),
+    "C706_olom_haftom-7-144-56-64.pdf": (7, "سفر آب درون زمین"),
+    "C706_olom_haftom-7-144-66-76.pdf": (8, "انرژی و تبدیل‌های آن"),
+    "C706_olom_haftom-7-144-77-85.pdf": (9, "منابع انرژی"),
+    "C706_olom_haftom-7-144-86-97.pdf": (10, "گرما و بهینه‌سازی مصرف انرژی"),
+    "C706_olom_haftom-7-144-99-106.pdf": (11, "یاخته و سازمان‌بندی آن"),
+    "C706_olom_haftom-7-144-107-115.pdf": (12, "سفرهٔ سلامت"),
+    "C706_olom_haftom-7-144-116-123.pdf": (13, "سفر غذا"),
+    "C706_olom_haftom-7-144-124-131.pdf": (14, "گردش مواد"),
+    "C706_olom_haftom-7-144-132-137.pdf": (15, "تبادل با محیط"),
+}
+
+
+def _resolve_pdf_key(c: PageCitation) -> str:
+    """Resolve a citation object to its exact underlying PDF filename."""
+    import re
+
+    # 1. Direct match in DOC_TO_CHAPTER
+    for cand in (c.doc_id, c.filename):
+        if not cand:
+            continue
+        pdf_name = cand if cand.endswith(".pdf") else f"{cand}.pdf"
+        if pdf_name in DOC_TO_CHAPTER:
+            return pdf_name
+
+    # 2. Match via chapter number e.g. "فصل 7"
+    for cand in (c.filename, c.doc_id):
+        if not cand:
+            continue
+        m = re.search(r"فصل\s*(\d+)", cand)
+        if m:
+            ch_num = int(m.group(1))
+            for f, (num, _) in DOC_TO_CHAPTER.items():
+                if num == ch_num:
+                    return f
+
+    if c.filename:
+        return c.filename if c.filename.endswith(".pdf") else f"{c.filename}.pdf"
+    if c.doc_id:
+        return c.doc_id if c.doc_id.endswith(".pdf") else f"{c.doc_id}.pdf"
+    return "science_textbook.pdf"
+
+
 def _format_inline(citations: List[PageCitation]) -> str:
     """
     Build a numbered citation block grouped by document using strict Markdown links.
@@ -93,12 +142,11 @@ def _format_inline(citations: List[PageCitation]) -> str:
     Documents are listed in the order their first citation appears.
     Pages within a document are deduplicated and sorted.
     """
-    # Group pages by filename (preserving order)
     seen: Dict[str, List[int]] = {}
     order: List[str] = []
 
     for c in citations:
-        key = c.filename or c.doc_id
+        key = _resolve_pdf_key(c)
         if key not in seen:
             seen[key] = []
             order.append(key)
@@ -106,14 +154,24 @@ def _format_inline(citations: List[PageCitation]) -> str:
             seen[key].append(c.page)
 
     lines = []
-    for i, key in enumerate(order, start=1):
-        pages = sorted(seen[key])
-        if len(pages) == 1:
-            p = pages[0]
-            lines.append(f"[{i}] [{key} – page {p}]({key}#page={p})")
+    for i, pdf_file in enumerate(order, start=1):
+        pages = sorted(seen[pdf_file])
+        ch_info = DOC_TO_CHAPTER.get(pdf_file)
+        if ch_info:
+            ch_num, _ = ch_info
+            if len(pages) == 1:
+                p = pages[0]
+                lines.append(f"[{i}] [فصل {ch_num}، صفحه {p}](/api/v1/pdf/{pdf_file}#page={p})")
+            else:
+                p_str = "، ".join(str(p) for p in pages)
+                lines.append(f"[{i}] [فصل {ch_num}، صفحات {p_str}](/api/v1/pdf/{pdf_file}#page={pages[0]})")
         else:
-            page_links = ", ".join(f"[{p}]({key}#page={p})" for p in pages)
-            lines.append(f"[{i}] [{key}]({key}#page={pages[0]}) – pages {page_links}")
+            if len(pages) == 1:
+                p = pages[0]
+                lines.append(f"[{i}] [{pdf_file} – page {p}](/api/v1/pdf/{pdf_file}#page={p})")
+            else:
+                p_str = "، ".join(str(p) for p in pages)
+                lines.append(f"[{i}] [{pdf_file} – pages {p_str}](/api/v1/pdf/{pdf_file}#page={pages[0]})")
 
     return "\n".join(lines)
 

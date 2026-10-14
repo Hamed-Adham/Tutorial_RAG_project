@@ -41,10 +41,21 @@ async def test_in_memory_session_store_lifecycle():
     assert len(s.turns[1].citations) == 1
     assert s.selected_chapters == [1, 2]
 
+    # Verify shared turn_pair_id linking Q&A
+    assert s.turns[0].turn_pair_id is not None
+    assert s.turns[0].turn_pair_id.startswith("turn_")
+    assert s.turns[0].turn_pair_id == s.turns[1].turn_pair_id
+
     # Retrieve and verify
     fetched = await store.get_session("sess_alpha")
     assert fetched is not None
     assert len(fetched.turns) == 2
+
+    # Update summary by turn_pair_id
+    updated = await store.update_turn_summary("sess_alpha", s.turns[0].turn_pair_id, "خلاصه اندازه‌گیری حجم")
+    assert updated is True
+    fetched_after = await store.get_session("sess_alpha")
+    assert fetched_after.turns[1].metadata.get("q_and_a_summary") == "خلاصه اندازه‌گیری حجم"
 
     # Delete session
     deleted = await store.delete_session("sess_alpha")

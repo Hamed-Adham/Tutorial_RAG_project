@@ -8,6 +8,7 @@ with seamless fallback to local snapshot weights.
 
 import os
 import json
+import threading
 import urllib.request
 import urllib.error
 from typing import List, Union, Optional
@@ -32,6 +33,12 @@ class BgeM3Embedder:
         self._local_model = None
         self._device = None
         self._use_api = True
+        self._lock = threading.Lock()
+
+    def warmup(self) -> None:
+        """Eagerly load local weights during startup to eliminate first-query cold start."""
+        with self._lock:
+            self._load_local_model()
 
     def _embed_batch_via_api(self, texts: List[str]) -> Optional[np.ndarray]:
         """Attempt to embed a batch of texts via Nine Router /v1/embeddings."""
@@ -61,7 +68,7 @@ class BgeM3Embedder:
                 }
             )
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=1.5) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     items = data.get("data", [])
                     if items:
@@ -85,9 +92,9 @@ class BgeM3Embedder:
 
         try:
             import torch
-            if torch.backends.mps.is_available():
-                self._device = "mps"
-            elif torch.cuda.is_available():
+            # Enforce CPU on macOS (Darwin) to prevent Apple Metal (MPS) command buffer race conditions
+            # and segmentation faults (SIGSEGV 11) when executing in asyncio thread pools.
+            if torch.cuda.is_available():
                 self._device = "cuda"
             else:
                 self._device = "cpu"
@@ -140,41 +147,41 @@ class BgeM3Embedder:
                 return np.vstack(all_vectors).astype(np.float32)
 
         # 2. Local fallback
-        print("Using local BGE-M3 model for embeddings...")
-        self._load_local_model()
+        with self._lock:
+            self._load_local_model()
 
-        if hasattr(self._local_model, "encode"):
-            embeddings = self._local_model.encode(
-                texts,
-                batch_size=batch_size,
-                show_progress_bar=len(texts) > 50,
-                normalize_embeddings=True
-            )
-            return np.array(embeddings, dtype=np.float32)
-        else:
-            import torch
-            all_embeddings = []
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i + batch_size]
-                encoded = self._tokenizer(
-                    batch_texts,
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                    return_tensors="pt"
-                ).to(self._device)
+            if hasattr(self._local_model, "encode"):
+                embeddings = self._local_model.encode(
+                    texts,
+                    batch_size=batch_size,
+                    show_progress_bar=len(texts) > 50,
+                    normalize_embeddings=True
+                )
+                return np.array(embeddings, dtype=np.float32)
+            else:
+                import torch
+                all_embeddings = []
+                for i in range(0, len(texts), batch_size):
+                    batch_texts = texts[i:i + batch_size]
+                    encoded = self._tokenizer(
+                        batch_texts,
+                        padding=True,
+                        truncation=True,
+                        max_length=512,
+                        return_tensors="pt"
+                    ).to(self._device)
 
-                with torch.no_grad():
-                    outputs = self._hf_model(**encoded)
-                    attention_mask = encoded["attention_mask"].unsqueeze(-1)
-                    token_embeddings = outputs.last_hidden_state
-                    sum_embeddings = torch.sum(token_embeddings * attention_mask, dim=1)
-                    sum_mask = torch.clamp(attention_mask.sum(dim=1), min=1e-9)
-                    pooled = sum_embeddings / sum_mask
-                    normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
-                    all_embeddings.append(normalized.cpu().numpy())
+                    with torch.no_grad():
+                        outputs = self._hf_model(**encoded)
+                        attention_mask = encoded["attention_mask"].unsqueeze(-1)
+                        token_embeddings = outputs.last_hidden_state
+                        sum_embeddings = torch.sum(token_embeddings * attention_mask, dim=1)
+                        sum_mask = torch.clamp(attention_mask.sum(dim=1), min=1e-9)
+                        pooled = sum_embeddings / sum_mask
+                        normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)
+                        all_embeddings.append(normalized.cpu().numpy())
 
-            return np.vstack(all_embeddings).astype(np.float32)
+                return np.vstack(all_embeddings).astype(np.float32)
 
     def embed_query(self, query: str) -> np.ndarray:
         """Embed a single query into a 1D dense vector."""

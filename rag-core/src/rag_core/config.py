@@ -52,7 +52,7 @@ class Settings:
     # Nine Router Settings (Local LLM & Embedding Proxy)
     nine_router_base_url: str = os.getenv("NINE_ROUTER_BASE_URL", os.getenv("OPENAI_BASE_URL", "http://localhost:20128/v1"))
     nine_router_api_key: str = os.getenv("NINE_ROUTER_API_KEY", os.getenv("OPENAI_API_KEY", "sk-83c65355ea1ab6f8-h7nd68-fcf94cfe"))
-    llm_model: str = os.getenv("LLM_MODEL", "open-code")
+    llm_model: str = os.getenv("LLM_MODEL", "RAG-synthesizer")
     rerank_timeout_ms: float = float(os.getenv("RERANK_TIMEOUT_MS", "3000.0"))
 
     # OmniRoute Settings (Local Gateway on Port 20130)
@@ -77,6 +77,11 @@ class Settings:
     # Legacy TypeSafe.ai credentials — FALLBACK only.
     jev_api_key: Optional[str] = os.getenv("JEV_API_KEY", None)
     system_one_api_key: Optional[str] = os.getenv("SYSTEM_ONE_API_KEY", None)
+
+    # ── SubQ Decisions API (System One Model 2) ─────────────────────────────
+    subq_endpoint: str = os.getenv("SUBQ_ENDPOINT", "https://api.subq.ai/v1/systemone")
+    subq_model: str = os.getenv("SUBQ_MODEL", "subq-snap-preview")
+    subq_api_key: str = os.getenv("SUBQ_API_KEY", "")
 
     @property
     def resolved_jev_api_key(self) -> Optional[str]:
@@ -126,6 +131,13 @@ class Settings:
     benchmark_target_total: int = int(os.getenv("BENCHMARK_TARGET_TOTAL", "400"))
     benchmark_faq_target: int = int(os.getenv("BENCHMARK_FAQ_TARGET", "200"))
     benchmark_science_target: int = int(os.getenv("BENCHMARK_SCIENCE_TARGET", "180"))
+
+    # Pipeline Feature Toggles & Model Pricing
+    enable_context_reordering: bool = os.getenv("ENABLE_CONTEXT_REORDERING", "false").lower() in ("true", "1", "yes")
+    cost_jev_input_per_million: float = 0.042
+    cost_subq_input_per_million: float = 0.050
+    cost_llm_input_per_million: float = 0.150
+    cost_llm_output_per_million: float = 0.600
 
 settings = Settings()
 

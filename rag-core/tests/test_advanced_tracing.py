@@ -137,6 +137,10 @@ class TestAdvancedTracingStructure(unittest.TestCase):
             answer="میتوکندری مرکز تنفس سلولی و تولید ATP است.\n\n[کتاب علوم](science.pdf#page=92)",
             is_refusal=False,
             rewrite_decision=rewrite_decision,
+            turn_pair_id="turn_abc123",
+            history=[{"question": "سلول چیست؟", "answer": "واحد ساختار جانداران"}],
+            subq_tokens=150,
+            jev_tokens=40,
             effective_query=rewrite_decision.rewritten_query,
             rewrite_latency_ms=12.5,
             dense_results=dense_cands,
@@ -161,21 +165,22 @@ class TestAdvancedTracingStructure(unittest.TestCase):
         root_call_kwargs = self.mock_client.start_observation.call_args.kwargs
         self.assertEqual(root_call_kwargs["name"], "advanced_science_rag")
         self.assertEqual(root_call_kwargs["as_type"], "chain")
+        self.assertIn("cost_breakdown", root_call_kwargs["metadata"])
 
-        # Verify that root called start_observation for all child stages
+        # Verify that root called start_observation for all top-level child stages
         stage_names = [call.kwargs.get("name") for call in self.mock_root.start_observation.call_args_list]
-        self.assertIn("query_understanding", stage_names)
-        self.assertIn("hybrid_retrieval", stage_names)
-        self.assertIn("neural_reranking", stage_names)
-        self.assertIn("parent_expansion_and_ordering", stage_names)
+        self.assertIn("query_gate", stage_names)
+        self.assertIn("query_transformation", stage_names)
+        self.assertIn("conversational_memory", stage_names)
+        self.assertIn("retrieval_chain", stage_names)
         self.assertIn("response_synthesis", stage_names)
 
         # Verify observation types
         stage_types = {call.kwargs.get("name"): call.kwargs.get("as_type") for call in self.mock_root.start_observation.call_args_list}
-        self.assertEqual(stage_types["query_understanding"], "chain")
-        self.assertEqual(stage_types["hybrid_retrieval"], "chain")
-        self.assertEqual(stage_types["neural_reranking"], "chain")
-        self.assertEqual(stage_types["parent_expansion_and_ordering"], "chain")
+        self.assertEqual(stage_types["query_gate"], "chain")
+        self.assertEqual(stage_types["query_transformation"], "chain")
+        self.assertEqual(stage_types["conversational_memory"], "chain")
+        self.assertEqual(stage_types["retrieval_chain"], "chain")
         self.assertEqual(stage_types["response_synthesis"], "generation")
 
     def test_evaluation_metrics_computation(self):

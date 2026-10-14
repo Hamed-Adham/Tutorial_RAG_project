@@ -1,4 +1,4 @@
-.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy eval-science-advanced build-bm25 index-science-qdrant kg-status build up down clean serve load-test
+.PHONY: help dev test test-gates check eval-smoke eval eval-force eval-llm eval-test eval-graph eval-modular eval-legacy eval-science-advanced eval-dev eval-report build-bm25 index-science-qdrant kg-status build up down clean serve load-test ui-dev ui-build
 
 PYTHON := .venv/bin/python
 PYTHONPATH := rag-core/src
@@ -74,6 +74,12 @@ eval-retrieval:
 eval-gates:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval --gates-only
 
+eval-dev:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval --split dev --judge subq --export-report
+
+eval-report:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval --split dev --export-report specs/007-comprehensive-benchmarks-subq-judge/evaluation_report.md
+
 eval-full:
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m rag_core.evaluation.run_eval
 
@@ -100,6 +106,13 @@ serve:
 
 load-test:
 	PYTHONPATH=$(PYTHONPATH):backend $(PYTHON) backend/tests/load/run_load_test.py 50 --mock
+
+ui-dev:
+	cd frontend && rm -rf .next && pnpm run dev
+
+ui-build:
+	cd frontend && pnpm run build
+
 
 
 # ── Codebase Knowledge Graph ─────────────────────────────────────────────────

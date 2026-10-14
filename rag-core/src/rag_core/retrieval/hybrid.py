@@ -27,6 +27,12 @@ class HybridRetriever:
         self.bm25_retriever = bm25_retriever or BM25Retriever()
         self.fusion = fusion or ReciprocalRankFusion(k=60)
 
+    def warmup(self) -> None:
+        """Eagerly warm up dense retriever and its local embedding model."""
+        dense = self._resolve_dense_retriever()
+        if dense is not None and hasattr(dense, "embedder") and hasattr(dense.embedder, "warmup"):
+            dense.embedder.warmup()
+
     async def _search_bm25(self, query: str, top_k: int, chapters: Optional[List[int]] = None) -> List[RetrievalCandidate]:
         """Run BM25 search in executor to keep event loop unblocked with native chapter pre-filtering."""
         loop = asyncio.get_running_loop()
@@ -218,3 +224,18 @@ class HybridRetriever:
             chapters=chapters
         )
         return details["fused"]
+
+    async def retrieve_documents(
+        self,
+        query: str,
+        top_k: int = 5,
+        overfetch_k: int = 50,
+        chapters: Optional[List[int]] = None
+    ) -> List[Any]:
+        """
+        Execute hybrid search and return standard LangChain Document objects.
+        Complies with LangChain BaseRetriever interface standards.
+        """
+        candidates = await self.retrieve(query=query, top_k=top_k, overfetch_k=overfetch_k, chapters=chapters)
+        return [c.to_langchain_document() for c in candidates]
+

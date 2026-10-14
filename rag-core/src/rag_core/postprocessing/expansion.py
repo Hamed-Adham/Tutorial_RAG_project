@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 import structlog
 
+from rag_core.config import settings
 from rag_core.indexing.science_schema import (
     RetrievalCandidate,
     ParentSection,
@@ -23,11 +24,16 @@ class LongContextReorder:
     
     Places highest-scoring items at the beginning and the end of the prompt window,
     with lower-scoring items in the middle.
+    Disabled by default via settings.enable_context_reordering.
     """
 
-    def reorder(self, items: List[Any]) -> List[Any]:
-        """Alternating reorder placing best at 0, 2nd best at -1, and worst in the middle."""
-        if len(items) <= 2:
+    def __init__(self, enabled: Optional[bool] = None):
+        self.enabled = settings.enable_context_reordering if enabled is None else enabled
+
+    def reorder(self, items: List[Any], force: bool = False) -> List[Any]:
+        """Alternating reorder placing best at 0, 2nd best at -1, and worst in the middle.
+        If disabled (default), returns unmodified items preserving natural rank order."""
+        if not (self.enabled or force) or len(items) <= 2:
             return list(items)
 
         result = [None] * len(items)
@@ -51,11 +57,12 @@ class ParentSectionExpander:
         parent_catalog: Optional[Dict[str, ParentSection]] = None,
         manifest_path: Optional[str | Path] = None,
         max_parents: int = 3,
-        max_tokens: int = 2500
+        max_tokens: int = 2500,
+        reorderer: Optional[LongContextReorder] = None,
     ):
         self.max_parents = max_parents
         self.max_tokens = max_tokens
-        self.reorderer = LongContextReorder()
+        self.reorderer = reorderer or LongContextReorder()
 
         if parent_catalog is not None:
             self.parent_catalog = parent_catalog

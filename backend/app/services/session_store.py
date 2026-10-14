@@ -39,9 +39,21 @@ class ISessionStore(ABC):
         assistant_answer: str,
         citations: List[PageCitation],
         latencies: Dict[str, float],
-        selected_chapters: Optional[List[int]] = None
+        selected_chapters: Optional[List[int]] = None,
+        q_and_a_summary: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None
     ) -> SessionStateModel:
-        """Append a user+assistant turn pair, enforce sliding window (last 4 turns), and reset TTL."""
+        """Append a user+assistant turn pair, enforce sliding window, and reset TTL."""
+        pass
+
+    @abstractmethod
+    async def update_turn_summary(self, session_id: str, turn_id: str, summary: str) -> bool:
+        """Update q_and_a_summary on a specific turn."""
+        pass
+
+    @abstractmethod
+    async def batch_update_summaries(self, session_id: str, summaries: Dict[str, str]) -> bool:
+        """Batch update q_and_a_summary across multiple turns in a session."""
         pass
 
     @abstractmethod
@@ -91,7 +103,9 @@ class InMemorySessionStore(ISessionStore):
         assistant_answer: str,
         citations: List[PageCitation],
         latencies: Dict[str, float],
-        selected_chapters: Optional[List[int]] = None
+        selected_chapters: Optional[List[int]] = None,
+        q_and_a_summary: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None
     ) -> SessionStateModel:
         session = await self.get_session(session_id)
         now = datetime.now(timezone.utc)
@@ -106,26 +120,38 @@ class InMemorySessionStore(ISessionStore):
                 ttl_seconds=self._default_ttl
             )
 
+        turn_pair_id = f"turn_{uuid.uuid4().hex[:12]}"
+
         # Append user turn
         session.turns.append(
             DialogueTurnModel(
                 turn_id=str(uuid.uuid4()),
+                turn_pair_id=turn_pair_id,
                 role="user",
                 content=user_query,
                 timestamp=now,
                 citations=[],
-                latency_profile={}
+                latency_profile={},
+                metadata={"turn_pair_id": turn_pair_id}
             )
         )
+        # Prepare assistant metadata
+        asst_metadata = dict(turn_metadata or {})
+        asst_metadata["turn_pair_id"] = turn_pair_id
+        if q_and_a_summary:
+            asst_metadata["q_and_a_summary"] = q_and_a_summary
+
         # Append assistant turn
         session.turns.append(
             DialogueTurnModel(
                 turn_id=str(uuid.uuid4()),
+                turn_pair_id=turn_pair_id,
                 role="assistant",
                 content=assistant_answer,
                 timestamp=now,
                 citations=citations,
-                latency_profile=latencies
+                latency_profile=latencies,
+                metadata=asst_metadata
             )
         )
 
@@ -139,6 +165,39 @@ class InMemorySessionStore(ISessionStore):
 
         await self.save_session(session)
         return session
+
+    async def update_turn_summary(self, session_id: str, turn_id: str, summary: str) -> bool:
+        session = await self.get_session(session_id)
+        if not session:
+            return False
+        updated = False
+        for turn in session.turns:
+            if turn.turn_id == turn_id or getattr(turn, "turn_pair_id", None) == turn_id:
+                turn.metadata["q_and_a_summary"] = summary
+                updated = True
+                if turn.role == "assistant":
+                    break
+        if updated:
+            await self.save_session(session)
+        return updated
+
+    async def batch_update_summaries(self, session_id: str, summaries: Dict[str, str]) -> bool:
+        session = await self.get_session(session_id)
+        if not session:
+            return False
+        updated = False
+        for turn in session.turns:
+            tid = turn.turn_id
+            tpid = getattr(turn, "turn_pair_id", None)
+            if tid in summaries:
+                turn.metadata["q_and_a_summary"] = summaries[tid]
+                updated = True
+            elif tpid and tpid in summaries:
+                turn.metadata["q_and_a_summary"] = summaries[tpid]
+                updated = True
+        if updated:
+            await self.save_session(session)
+        return updated
 
     async def delete_session(self, session_id: str) -> bool:
         async with self._lock:
@@ -220,7 +279,9 @@ class RedisSessionStore(ISessionStore):
         assistant_answer: str,
         citations: List[PageCitation],
         latencies: Dict[str, float],
-        selected_chapters: Optional[List[int]] = None
+        selected_chapters: Optional[List[int]] = None,
+        q_and_a_summary: Optional[str] = None,
+        turn_metadata: Optional[Dict[str, Any]] = None
     ) -> SessionStateModel:
         session = await self.get_session(session_id)
         now = datetime.now(timezone.utc)
@@ -235,24 +296,36 @@ class RedisSessionStore(ISessionStore):
                 ttl_seconds=self.ttl_seconds
             )
 
+        turn_pair_id = f"turn_{uuid.uuid4().hex[:12]}"
+
         session.turns.append(
             DialogueTurnModel(
                 turn_id=str(uuid.uuid4()),
+                turn_pair_id=turn_pair_id,
                 role="user",
                 content=user_query,
                 timestamp=now,
                 citations=[],
-                latency_profile={}
+                latency_profile={},
+                metadata={"turn_pair_id": turn_pair_id}
             )
         )
+
+        asst_metadata = dict(turn_metadata or {})
+        asst_metadata["turn_pair_id"] = turn_pair_id
+        if q_and_a_summary:
+            asst_metadata["q_and_a_summary"] = q_and_a_summary
+
         session.turns.append(
             DialogueTurnModel(
                 turn_id=str(uuid.uuid4()),
+                turn_pair_id=turn_pair_id,
                 role="assistant",
                 content=assistant_answer,
                 timestamp=now,
                 citations=citations,
-                latency_profile=latencies
+                latency_profile=latencies,
+                metadata=asst_metadata
             )
         )
 
@@ -265,6 +338,47 @@ class RedisSessionStore(ISessionStore):
 
         await self.save_session(session)
         return session
+
+    async def update_turn_summary(self, session_id: str, turn_id: str, summary: str) -> bool:
+        client = await self._get_redis()
+        if not self._redis_available or client is None:
+            return await self._fallback.update_turn_summary(session_id, turn_id, summary)
+
+        session = await self.get_session(session_id)
+        if not session:
+            return False
+        updated = False
+        for turn in session.turns:
+            if turn.turn_id == turn_id or getattr(turn, "turn_pair_id", None) == turn_id:
+                turn.metadata["q_and_a_summary"] = summary
+                updated = True
+                if turn.role == "assistant":
+                    break
+        if updated:
+            await self.save_session(session)
+        return updated
+
+    async def batch_update_summaries(self, session_id: str, summaries: Dict[str, str]) -> bool:
+        client = await self._get_redis()
+        if not self._redis_available or client is None:
+            return await self._fallback.batch_update_summaries(session_id, summaries)
+
+        session = await self.get_session(session_id)
+        if not session:
+            return False
+        updated = False
+        for turn in session.turns:
+            tid = turn.turn_id
+            tpid = getattr(turn, "turn_pair_id", None)
+            if tid in summaries:
+                turn.metadata["q_and_a_summary"] = summaries[tid]
+                updated = True
+            elif tpid and tpid in summaries:
+                turn.metadata["q_and_a_summary"] = summaries[tpid]
+                updated = True
+        if updated:
+            await self.save_session(session)
+        return updated
 
     async def delete_session(self, session_id: str) -> bool:
         client = await self._get_redis()

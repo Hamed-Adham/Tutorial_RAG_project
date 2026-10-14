@@ -118,6 +118,9 @@ class LLMJudge:
 
             except Exception as e:
                 last_error = e
+                err_str = str(e)
+                if "403" in err_str or "PermissionDenied" in err_str or "not allowed" in err_str:
+                    break
                 print(f"  [Judge warning] Attempt {attempt}/3 failed ({e}). Retrying in 2s...")
                 time.sleep(2)
 

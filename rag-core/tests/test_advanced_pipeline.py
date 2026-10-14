@@ -20,10 +20,11 @@ from rag_core.indexing.science_schema import (
 )
 from rag_core.pipeline import AdvancedRAGPipeline
 from rag_core.retrieval.hybrid import HybridRetriever
-from rag_core.query.gated_rewriter import GatedQueryRewriter
+from rag_core.query.query_gate import QueryGate, GatedQueryRewriter
 from rag_core.fusion.reranker import CrossEncoderReranker
 from rag_core.postprocessing.expansion import ParentSectionExpander, LongContextReorder
 from rag_core.generation.synthesizer import ResponseSynthesizer as Synthesizer, SynthesisResult
+from rag_core.observability.langfuse import LangfuseTracker
 
 
 @pytest.fixture
@@ -85,6 +86,8 @@ def mock_pipeline_components():
         completion_tokens=30,
         total_tokens=180
     )
+    mock_tracker = MagicMock(spec=LangfuseTracker)
+    mock_tracker.is_active = False
 
     return {
         "retriever": mock_retriever,
@@ -93,6 +96,7 @@ def mock_pipeline_components():
         "expander": mock_expander,
         "reorderer": mock_reorderer,
         "synthesizer": mock_synthesizer,
+        "tracker": mock_tracker,
     }
 
 
@@ -109,6 +113,7 @@ async def test_advanced_pipeline_e2e_latency_and_citations(mock_pipeline_compone
         expander=mock_pipeline_components["expander"],
         reorderer=mock_pipeline_components["reorderer"],
         synthesizer=mock_pipeline_components["synthesizer"],
+        tracker=mock_pipeline_components["tracker"],
     )
 
     t0 = time.perf_counter()

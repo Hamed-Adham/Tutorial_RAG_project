@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BenchmarkItemContract",
+  "description": "Standardized schema contract for multi-suite benchmark items in Unified RAG",
+  "type": "object",
+  "required": [
+    "item_id",
+    "suite",
+    "split",
+    "difficulty",
+    "query",
+    "ground_truth",
+    "expected_route"
+  ],
+  "properties": {
+    "item_id": {
+      "type": "string",
+      "pattern": "^[A-Z0-9_\\-]+$"
+    },
+    "suite": {
+      "type": "string",
+      "enum": [
+        "science_curriculum",
+        "administrative_faq",
+        "conversational_memory",
+        "subquery_decomposition",
+        "adversarial_refusal"
+      ]
+    },
+    "split": {
+      "type": "string",
+      "enum": ["dev", "test"]
+    },
+    "difficulty": {
+      "type": "string",
+      "enum": ["easy", "medium", "hard", "adversarial"]
+    },
+    "query": {
+      "type": "string",
+      "minLength": 3
+    },
+    "ground_truth": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_route": {
+      "type": "string"
+    },
+    "expected_behavior": {
+      "type": "string",
+      "enum": ["answer", "refusal"],
+      "default": "answer"
+    },
+    "gold_chunk_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "gold_doc_ids": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "history_turns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["turn_id", "question", "answer"],
+        "properties": {
+          "turn_id": { "type": "string" },
+          "question": { "type": "string" },
+          "answer": { "type": "string" },
+          "summary": { "type": ["string", "null"] },
+          "is_needed": { "type": "boolean" }
+        }
+      }
+    },
+    "category": { "type": ["string", "null"] },
+    "multi_hop": { "type": "boolean" },
+    "requires_diagram": { "type": "boolean" },
+    "subqueries": {
+      "type": ["array", "null"],
+      "items": { "type": "string" }
+    },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false
+}

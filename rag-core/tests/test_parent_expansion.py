@@ -85,14 +85,14 @@ def test_parent_expansion_max_ceiling(mock_parent_catalog):
 
 
 def test_long_context_reorder():
-    reorderer = LongContextReorder()
-    # 5 items ordered by descending relevance: [1, 2, 3, 4, 5]
+    # 1. Disabled by default: preserves natural rank order
+    reorderer_default = LongContextReorder()
     items = ["Doc 1 (Best)", "Doc 2", "Doc 3", "Doc 4", "Doc 5 (Worst)"]
-    reordered = reorderer.reorder(items)
+    assert reorderer_default.reorder(items) == items
 
-    # In LongContextReorder:
-    # Most relevant items should be placed at the beginning and the end:
-    # Standard alternating pattern: [Doc 1, Doc 3, Doc 5, Doc 4, Doc 2]
+    # 2. Explicitly enabled: alternating pattern
+    reorderer_enabled = LongContextReorder(enabled=True)
+    reordered = reorderer_enabled.reorder(items)
     # Doc 1 is at index 0, Doc 2 is at index -1
     assert reordered[0] == "Doc 1 (Best)"
     assert reordered[-1] == "Doc 2"

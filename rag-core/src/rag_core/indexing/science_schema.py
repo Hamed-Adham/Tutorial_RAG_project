@@ -3,9 +3,77 @@ Domain Schemas for 7th-Grade Science Textbook Curriculum.
 Defines atomic chunks, cohesive parent sections, and hybrid candidate models per data-model.md.
 """
 
+from enum import Enum
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 from rag_core.postprocessing.citations import PageCitation
+
+
+class CurriculumIntentTier(str, Enum):
+    """3-tier curriculum intent classification for QueryGate."""
+    COMPLETELY_IRRELEVANT = "completely_irrelevant"
+    PARTIALLY_RELEVANT = "partially_relevant"
+    RELEVANT = "relevant"
+
+
+class ContextNeedTier(str, Enum):
+    """4-tier dispatching classification for QueryGate."""
+    NEEDS_HISTORY_AND_RETRIEVE = "needs_history_and_retrieve"
+    NEEDS_HISTORY_ONLY = "needs_history_only"
+    NEEDS_RETRIEVE_ONLY = "needs_retrieve_only"
+    NEEDS_NEITHER = "needs_neither"
+
+
+class HistoryRelevanceTier(str, Enum):
+    """4-tier rubric evaluated by SubQ Decision Model 2 for each historical turn."""
+    NOT_NEEDED_NOT_RELEVANT = "not_needed_not_relevant"
+    NOT_NEEDED_RELEVANT = "not_needed_relevant"
+    NEEDED_NOT_RELEVANT = "needed_not_relevant"
+    NEEDED_RELEVANT = "needed_relevant"
+
+
+class SelectedHistoryItem(BaseModel):
+    """An individual historical turn chosen as context for synthesis/retrieval."""
+    turn_id: str
+    turn_index: int
+    is_recent_5: bool
+    content_type: str = Field(description="'full_text' if is_recent_5, else 'summary'")
+    question: str
+    answer: str
+    summary: Optional[str] = None
+    relevance_tier: HistoryRelevanceTier
+    confidence: float = 1.0
+
+
+class QueryGateDecision(BaseModel):
+    """Full decision model returned by QueryGate."""
+    raw_query: str
+    effective_query: str
+    intent_tier: CurriculumIntentTier
+    context_need_tier: ContextNeedTier
+    is_refusal: bool = False
+    bypass_retrieval: bool = False
+    transformation_type: str = "bypass"
+    is_compound: bool = False
+    selected_history_items: List[SelectedHistoryItem] = Field(default_factory=list)
+    sub_queries: List[str] = Field(default_factory=list)
+    reasoning: str = ""
+    latencies: Dict[str, float] = Field(default_factory=dict)
+    jev_tokens: int = Field(default=0, description="Input tokens used by Jev System One Model 1")
+    subq_tokens: int = Field(default=0, description="Input tokens used by SubQ System One Model 2")
+    transform_tokens: int = Field(default=0, description="Tokens used by transformation LLM call")
+    missing_summaries_backfilled: int = Field(default=0, description="Count of historical summaries backfilled")
+
+
+class QASummaryRecord(BaseModel):
+    """Persisted Q&A summary record."""
+    turn_id: str
+    session_id: str
+    question_text: str
+    answer_text: str
+    summary_text: str
+    created_at: float
+
 
 
 class ScienceChunk(BaseModel):
@@ -54,6 +122,39 @@ class RetrievalCandidate(BaseModel):
         if doc and not doc.endswith(".pdf"):
             doc = f"{doc}.pdf"
         return f"{doc}#page={self.page}"
+
+    def to_langchain_document(self):
+        """Converts to standard langchain_core.documents.Document."""
+        try:
+            from langchain_core.documents import Document
+            return Document(
+                page_content=self.text,
+                metadata={
+                    "chunk_id": self.chunk_id,
+                    "section_id": self.section_id,
+                    "chapter": self.chapter,
+                    "page": self.page,
+                    "breadcrumbs": self.breadcrumbs,
+                    "doc_id": self.doc_id,
+                    "dense_score": self.dense_score,
+                    "dense_rank": self.dense_rank,
+                    "bm25_score": self.bm25_score,
+                    "bm25_rank": self.bm25_rank,
+                    "rrf_score": self.rrf_score,
+                    "chunk_identifier": self.chunk_identifier,
+                }
+            )
+        except ImportError:
+            return {
+                "page_content": self.text,
+                "metadata": {
+                    "chunk_id": self.chunk_id,
+                    "section_id": self.section_id,
+                    "chapter": self.chapter,
+                    "page": self.page,
+                    "chunk_identifier": self.chunk_identifier
+                }
+            }
 
 
 class RerankedCandidate(BaseModel):

@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "080cbef31d36ab63cb6505fd7b8c21a6329c41ba",
-    "indexed_at": "2026-10-10T18:32:55Z",
+    "commit": "27c8cc112f917321684ff52aa542fb60539887b6",
+    "indexed_at": "2026-10-14T18:28:21Z",
     "project": "Users-hmd-Documents-Obisidan-My-second-mind-Mentorship-Projects-Unified_RAG",
-    "nodes": 3678,
-    "edges": 8872,
-    "original_size": 11796480,
-    "compressed_size": 944390,
+    "nodes": 5041,
+    "edges": 13885,
+    "original_size": 16777216,
+    "compressed_size": 1433465,
     "compression_level": 3
 }

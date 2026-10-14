@@ -79,10 +79,14 @@ file before ending your session. It is the living map of the project.
     graph/nodes.py           # Node factories: guard, retrieve, rerank, synth, eval
     graph/pipeline_graph.py  # LangGraphRAGPipeline (compiled StateGraph)
 
-### Stage 10 — Evaluation  <-- CANONICAL: make eval points HERE
+### Stage 10 — Evaluation  <-- CANONICAL: make eval / make eval-dev
     evaluation/
-    ├── code_gates.py        # Layer 1 deterministic gates (<5ms, 0 tokens)
-    ├── judge_evaluator.py   # Layer 2 LLM-as-judge  [EDIT HERE]
+    ├── benchmark_schema.py  # Pydantic v2 schemas: BenchmarkItem, GateResult, SubQJudgeVerdict, ConfusionMatrixResult, EvaluationReport
+    ├── code_gates.py        # Layer 1 deterministic gates (<5ms, 0 tokens: refusal, routing, hit@k, citation)
+    ├── subq_judge.py        # Layer 2 SubQ Decisions API System One LLM-as-a-Judge with LLMJudge fallback
+    ├── decoupled_eval.py    # 2x2 Decoupled Confusion Matrix (TP, FP, TN, FN, Hallucination Catch Rate)
+    ├── report_generator.py  # Automated Markdown (Scorecard, Confusion Matrix, Taxonomy) & JSON report generator
+    ├── judge_evaluator.py   # Layer 2 LLM-as-judge local fallback (Nine Router / Gemini)
     ├── jev_judge.py         # Layer 2.5 Jev speculative fan-out judge
     ├── jev_client.py        # Jev API client
     ├── rubrics.py           # 5-part Persian CoT rubrics
@@ -92,17 +96,19 @@ file before ending your session. It is the living map of the project.
     ├── quality_gate.py      # Pass/fail threshold validator
     ├── baseline_manager.py  # Baseline snapshots + drift detection
     ├── retrieval_scorer.py  # Approach 2 OCR-tolerant retrieval scorer
+    ├── generate_suite_datasets.py # Master 360-item generator across 5 calibrated suites
     ├── build_standardized_benchmarks.py  # Master benchmark generator, corpus aligner & Step 7 validator
     ├── migrate_datasets_to_langfuse.py   # Cloud dataset migration with virtual subfolder hierarchy
     ├── langfuse_dataset.py  # Sync to Langfuse Dataset
-    ├── run_eval.py          # Modular eval (--gates-only, --pipeline, --retrieval-only, --audit-jev)
-    ├── run_baseline_eval.py # Full baseline eval runner  [EDIT HERE]
+    ├── run_eval.py          # Multi-suite runner (--suite, --split, --judge, --scope, --export-report)
+    ├── run_baseline_eval.py # Full baseline eval runner
     ├── baselines/           # Saved JSON reports
     └── datasets/
-        ├── golden_set.jsonl # 110-item benchmark (81 dev / 29 test across 4 suites)
-        ├── suites/          # Master CSV suites (input, expected_output, metadata)
-        ├── dev/ & test/     # Partitioned CSV splits
-        └── langfuse/        # Mirror for cloud dataset virtual namespaces
+        ├── master_golden_set.jsonl # 360-item calibrated golden benchmark across 5 suites
+        ├── dev/dev_set.jsonl       # Sealed 25% dev partition (90 items)
+        ├── test/test_set.jsonl     # Sealed 75% test partition (270 items)
+        ├── suites/                 # Calibrated CSV suites: science, faq, memory, decomposition, refusal
+        └── golden_set.jsonl        # Legacy benchmark mirror
 
 ### Stage 10 — Observability
     observability/langfuse.py, logging.py, trace_evaluators.py

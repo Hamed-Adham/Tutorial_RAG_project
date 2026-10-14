@@ -23,8 +23,9 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+!frontend/src/lib/
 parts/
 sdist/
 var/
@@ -43,7 +44,34 @@ htmlcov/
 .vscode/
 .idea/
 
-# Local Vector & Model Stores
+# Local Vector, Model Stores & Scratch
 data_index/
 *.sqlite3
 chat_export.txt
+scratch/
+scratch_*.py
+*.log
+
+# Large Model Weights & Checkpoints
+*.bin
+*.gguf
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+models/
+huggingface/
+
+# Next.js Build Artifacts
+.next/
+frontend/.next/
+*.tsbuildinfo
+
+# Binary assets & fonts
+frontend/public/*.pdf
+*.woff
+*.woff2
+*.ttf
+
+

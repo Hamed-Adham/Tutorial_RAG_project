@@ -27,11 +27,11 @@ from rag_core.indexing.science_schema import (
     AdvancedRAGResult,
     PageCitation
 )
-from rag_core.query.gated_rewriter import GatedQueryRewriter
+from rag_core.query.query_gate import QueryGate, GatedQueryRewriter
 from rag_core.retrieval.hybrid import HybridRetriever
 from rag_core.fusion.reranker import CrossEncoderReranker
 from rag_core.postprocessing.expansion import ParentSectionExpander, LongContextReorder
-from rag_core.postprocessing.citations import CitationFormatter
+from rag_core.postprocessing.citations import CitationFormatter, DOC_TO_CHAPTER
 from rag_core.generation.synthesizer import ResponseSynthesizer as Synthesizer
 from rag_core.observability.langfuse import LangfuseTracker
 from rag_core.observability.trace_evaluators import dispatch_trace_evaluation
@@ -40,6 +40,16 @@ from rag_core.generation.prompts import SYSTEM_PROMPT_PERSIAN_GROUNDED
 logger = logging.getLogger(__name__)
 
 GROUNDED_REFUSAL_FA = "بر اساس برنامه درسی علوم پایه هفتم، اطلاعاتی درباره این پرسش در کتاب یافت نشد."
+
+
+async def _notify_status(cb: Optional[Any], step: str, title: str) -> None:
+    if cb is not None:
+        try:
+            res = cb(step, title)
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
 
 
 class AdvancedRAGPipeline(IAdvancedRAGPipeline):
@@ -67,13 +77,59 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         self.tracker = tracker or LangfuseTracker()
         self.synthesizer = synthesizer or Synthesizer(tracker=self.tracker)
         self.citation_formatter = CitationFormatter()
+        self._session_citations: Dict[str, List[PageCitation]] = {}
+        self._session_is_refusal: Dict[str, bool] = {}
+        self._session_effective_query: Dict[str, str] = {}
+        self._session_latencies: Dict[str, Dict[str, float]] = {}
+        self.last_citations: List[PageCitation] = []
+        self.last_is_refusal: bool = False
+        self.last_effective_query: str = ""
+        self.last_latencies: Dict[str, float] = {}
 
         if warmup:
             self.warmup()
 
     def warmup(self) -> None:
-        """Eagerly load CrossEncoder weights into memory to eliminate first-query cold-start latency."""
+        """Eagerly load CrossEncoder weights and dense embedder into memory to eliminate first-query cold-start latency."""
         self.reranker.warmup()
+        if hasattr(self.hybrid_retriever, "warmup"):
+            self.hybrid_retriever.warmup()
+
+    def get_citations_for_session(self, session_id: Optional[str]) -> List[PageCitation]:
+        if session_id and session_id in self._session_citations:
+            return self._session_citations[session_id]
+        return self.last_citations
+
+    def get_refusal_for_session(self, session_id: Optional[str]) -> bool:
+        if session_id and session_id in self._session_is_refusal:
+            return self._session_is_refusal[session_id]
+        return self.last_is_refusal
+
+    def get_effective_query_for_session(self, session_id: Optional[str]) -> str:
+        if session_id and session_id in self._session_effective_query:
+            return self._session_effective_query[session_id]
+        return self.last_effective_query
+
+    def get_latencies_for_session(self, session_id: Optional[str]) -> Dict[str, float]:
+        if session_id and session_id in self._session_latencies:
+            return dict(self._session_latencies[session_id])
+        return dict(self.last_latencies)
+
+
+    def as_langgraph_pipeline(self):
+        """
+        Compile and return the pipeline as a native LangGraph StateGraph (EnterpriseScienceGraph).
+        Enables standard LangGraph declarative execution, streaming, and visual graph inspection.
+        """
+        from rag_core.graph.pipeline_graph import EnterpriseScienceGraph
+        return EnterpriseScienceGraph(
+            rewriter=self.rewriter,
+            hybrid_retriever=self.hybrid_retriever,
+            reranker=self.reranker,
+            expander=self.expander,
+            reorderer=self.reorderer,
+            synthesizer=self.synthesizer
+        )
 
     async def retrieve(
         self,
@@ -120,19 +176,24 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         top_k: int = 5,
         overfetch_k: int = 50,
         selected_chapters: Optional[List[int]] = None,
+        status_callback: Optional[Any] = None,
     ) -> AsyncIterator[str]:
         """
         Execute full enterprise RAG pipeline yielding response tokens as an asynchronous generator.
         Measures Time-To-First-Token (TTFT < 1.0s) and appends citation metadata at the end of the stream.
         """
         total_start = time.perf_counter()
+        latencies: Dict[str, float] = {}
 
         # Stage 1: Confidence-Gated Query Understanding
+        await _notify_status(status_callback, "rewrite", "تحلیل و بررسی سوال")
+        t0 = time.perf_counter()
         rewrite_decision: RewriteDecision = await self.rewriter.evaluate_and_rewrite(
             query=query_text,
             history=history,
             selected_chapters=selected_chapters
         )
+        latencies["rewrite_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         effective_query = rewrite_decision.rewritten_query or query_text
 
         if not rewrite_decision.proceed_to_retrieval:
@@ -141,10 +202,21 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
                 if rewrite_decision.active_chapters
                 else "کتاب علوم تجربی پایه هفتم"
             )
-            yield f"این سوال در حیطه مباحث {scope_desc} قرار ندارد. لطفاً سوالی مرتبط با مباحث درسی مطرح کنید."
+            latencies["total_ms"] = round((time.perf_counter() - total_start) * 1000.0, 2)
+            if session_id:
+                self._session_latencies[session_id] = latencies
+            self.last_latencies = latencies
+            refusal_msg = (
+                rewrite_decision.reasoning
+                if (rewrite_decision.reasoning and any('\u0600' <= c <= '\u06FF' for c in rewrite_decision.reasoning))
+                else f"این سوال در حیطه مباحث {scope_desc} قرار ندارد. لطفاً سوالی مرتبط با مباحث درسی مطرح کنید."
+            )
+            yield refusal_msg
             return
 
         # Stage 2: Parallel Hybrid Retrieval
+        await _notify_status(status_callback, "retrieval", "جستجوی اسناد و کتاب درسی")
+        t0 = time.perf_counter()
         if rewrite_decision.sub_queries and len(rewrite_decision.sub_queries) > 1:
             retrieval_tasks = [
                 self.hybrid_retriever.retrieve(
@@ -170,12 +242,24 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
                 overfetch_k=overfetch_k,
                 chapters=rewrite_decision.active_chapters
             )
+        latencies["retrieval_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
         if not candidates:
-            yield GROUNDED_REFUSAL_FA
+            latencies["total_ms"] = round((time.perf_counter() - total_start) * 1000.0, 2)
+            if session_id:
+                self._session_latencies[session_id] = latencies
+            self.last_latencies = latencies
+            if rewrite_decision.active_chapters:
+                ch_str = "، ".join(str(c) for c in rewrite_decision.active_chapters)
+                refusal_msg = f"در محدوده فصل‌های انتخابی ({ch_str})، اطلاعاتی درباره این پرسش در کتاب یافت نشد. لطفاً دامنه جستجو را گسترش دهید یا تمام کتاب را انتخاب فرمایید."
+            else:
+                refusal_msg = GROUNDED_REFUSAL_FA
+            yield refusal_msg
             return
 
         # Stage 3: Neural Cross-Encoder Reranking
+        await _notify_status(status_callback, "rerank", "بازرتبه‌بندی عصبی شواهد")
+        t0 = time.perf_counter()
         rerank_timeout = getattr(settings, "rerank_timeout_ms", 3000.0)
         reranked_candidates = await self.reranker.rerank(
             query=effective_query,
@@ -183,14 +267,18 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             top_k=top_k,
             timeout_ms=rerank_timeout
         )
+        latencies["rerank_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
         # Stage 4: Parent Section Expansion & Context Reordering
+        await _notify_status(status_callback, "expansion", "بسط و تکمیل بخش‌های مرتبط")
+        t0 = time.perf_counter()
         expanded_context = self.expander.expand(
             candidates=reranked_candidates,
             max_sections=3,
             token_ceiling=2500
         )
         reordered_sections = self.reorderer.reorder(expanded_context.parent_sections)
+        latencies["expansion_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
         # Build citation objects
         citation_candidates = []
@@ -199,13 +287,15 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             doc_id = getattr(c, "doc_id", "science_textbook") or "science_textbook"
             if not doc_id.endswith(".pdf"):
                 doc_id = f"{doc_id}.pdf"
+            ch_info = DOC_TO_CHAPTER.get(doc_id)
+            display_name = f"فصل {ch_info[0]}، صفحه {c.page}" if ch_info else f"کتاب درسی، صفحه {c.page}"
             citation_candidates.append({
                 "doc_id": doc_id,
-                "filename": "کتاب علوم تجربی هفتم",
+                "filename": doc_id,
                 "page": c.page,
                 "chunk_id": c.chunk_id,
                 "score": rc.cross_encoder_score,
-                "metadata": {"title": c.breadcrumbs}
+                "metadata": {"title": c.breadcrumbs, "display_name": display_name}
             })
         citation_bundle = self.citation_formatter.format(citation_candidates)
 
@@ -227,6 +317,8 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             synth_prompt = f"{synth_prompt}\n\n{PROMPT_COMPOUND_DIRECTIVE_FA}"
 
         # Stage 5: Streaming Token Synthesis with TTFT Tracking
+        await _notify_status(status_callback, "synthesis", "نگارش پاسخ مستند")
+        t0 = time.perf_counter()
         first_token = True
         self.last_ttft_ms = None
         full_tokens = []
@@ -234,13 +326,17 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             query=effective_query,
             chunks=chunks_for_synth,
             system_prompt=synth_prompt,
-            session_id=session_id
+            session_id=session_id,
+            history=history,
         ):
             if first_token:
                 self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
                 first_token = False
             full_tokens.append(token)
             yield token
+
+        latencies["synthesis_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        latencies["total_ms"] = round((time.perf_counter() - total_start) * 1000.0, 2)
 
         # Append citations at the end of stream
         accumulated_answer = "".join(full_tokens).strip()
@@ -249,7 +345,60 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             or "اطلاعاتی درباره این پرسش در کتاب یافت نشد" in accumulated_answer
         )
         if citation_bundle.inline_text and not is_refusal:
-            yield f"\n\n**Sources:**\n{citation_bundle.inline_text}"
+            yield f"\n\n---\n\n**Sources:**\n{citation_bundle.inline_text}"
+
+        # Persist session metadata for streaming consumer
+        if session_id:
+            self._session_citations[session_id] = citation_bundle.citations
+            self._session_is_refusal[session_id] = is_refusal
+            self._session_effective_query[session_id] = effective_query
+            self._session_latencies[session_id] = latencies
+        self.last_citations = citation_bundle.citations
+        self.last_is_refusal = is_refusal
+        self.last_effective_query = effective_query
+        # Stage 6: Langfuse Observability for streaming
+        trace_id = "offline_trace"
+        if self.tracker and self.tracker.is_active:
+            try:
+                trace_id = self.tracker.trace_advanced_pipeline(
+                    name="advanced_science_rag_stream",
+                    question=query_text,
+                    answer=accumulated_answer,
+                    is_refusal=is_refusal,
+                    session_id=session_id,
+                    tags=["pipeline:advanced", "domain:science_textbook", "mode:stream"],
+                    metadata={
+                        "effective_query": effective_query,
+                        "rewritten": rewrite_decision.needs_rewrite,
+                        "top_k": top_k,
+                    },
+                    rewrite_decision=rewrite_decision,
+                    history=history,
+                    effective_query=effective_query,
+                    rewrite_latency_ms=latencies.get("rewrite_ms", 0.0),
+                    dense_results=candidates,
+                    bm25_results=[],
+                    fused_candidates=candidates,
+                    retrieval_latency_ms=latencies.get("retrieval_ms", 0.0),
+                    input_candidates=candidates[:8],
+                    reranked_candidates=reranked_candidates,
+                    circuit_breaker_status=getattr(self.reranker, "circuit_breaker_status", "active"),
+                    rerank_latency_ms=latencies.get("rerank_ms", 0.0),
+                    expanded_context=expanded_context,
+                    reordered_sections=reordered_sections,
+                    expansion_latency_ms=latencies.get("expansion_ms", 0.0),
+                    synthesis_result=None,
+                    full_prompt=synth_prompt,
+                    raw_completion=accumulated_answer,
+                    synthesis_latency_ms=latencies.get("synthesis_ms", 0.0),
+                    ttft_ms=self.last_ttft_ms,
+                    latencies=latencies,
+                )
+                self.tracker.flush()
+            except Exception as e:
+                logger.warning(f"Error logging Langfuse stream trace: {e}")
+        self.last_trace_id = trace_id
+
 
     async def query(
         self,
@@ -458,13 +607,15 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             doc_id = getattr(c, "doc_id", "science_textbook") or "science_textbook"
             if not doc_id.endswith(".pdf"):
                 doc_id = f"{doc_id}.pdf"
+            ch_info = DOC_TO_CHAPTER.get(doc_id)
+            display_name = f"فصل {ch_info[0]}، صفحه {c.page}" if ch_info else f"کتاب درسی، صفحه {c.page}"
             citation_candidates.append({
                 "doc_id": doc_id,
-                "filename": "کتاب علوم تجربی هفتم",
+                "filename": doc_id,
                 "page": c.page,
                 "chunk_id": c.chunk_id,
                 "score": rc.cross_encoder_score,
-                "metadata": {"title": c.breadcrumbs}
+                "metadata": {"title": c.breadcrumbs, "display_name": display_name}
             })
         citation_bundle = self.citation_formatter.format(citation_candidates)
 
@@ -490,9 +641,11 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             synth_result = self.synthesizer.synthesize(
                 query=effective_query,
                 chunks=chunks_for_synth,
-                system_prompt=synth_prompt
+                system_prompt=synth_prompt,
+                session_id=session_id,
+                history=history,
             )
-            raw_answer = synth_result.answer
+            raw_answer = synth_result.raw_completion or synth_result.answer.split("**Sources:**")[0].split("📚")[0].rstrip()
             is_refusal = synth_result.is_fallback
         except Exception as e:
             logger.warning(f"Synthesizer invocation error: {e}, using grounded summary fallback")
@@ -513,9 +666,11 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         ]
 
         if citation_bundle.inline_text and not is_refusal:
-            final_answer = f"{raw_answer.rstrip()}\n\n{citation_bundle.inline_text}"
+            final_answer = f"{raw_answer.rstrip()}\n\n---\n\n**Sources:**\n{citation_bundle.inline_text}"
+
         else:
             final_answer = raw_answer
+
 
         latencies["synthesis_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         total_elapsed_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
@@ -565,6 +720,7 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
                     synthesis_latency_ms=latencies.get("synthesis_ms", 0.0),
                     latencies=latencies,
                 )
+                self.tracker.flush()
             except Exception as e:
                 logger.warning(f"Error logging Langfuse trace: {e}")
 

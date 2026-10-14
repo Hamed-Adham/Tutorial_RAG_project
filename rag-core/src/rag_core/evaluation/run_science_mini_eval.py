@@ -64,6 +64,10 @@ async def run_mini_benchmark(limit: int = 3, dataset_path: str = None):
 
     print("\n" + "=" * 70)
     print("✅ Limited run completed successfully! All dense & lexical searches active.")
+    if pipeline.tracker and pipeline.tracker.is_active:
+        print("📡 Flushing all traces to Langfuse Cloud...")
+        pipeline.tracker.flush()
+        print("✓ Telemetry flushed to Langfuse Cloud!")
     print("=" * 70)
 
 

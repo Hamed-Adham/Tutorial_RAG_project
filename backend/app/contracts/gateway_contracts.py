@@ -50,6 +50,7 @@ class ChatResponse(BaseModel):
     is_refusal: bool = False
     latency_profile: Dict[str, float] = Field(default_factory=dict)
     trace_id: str
+    cost_1k: Optional[Dict[str, Any]] = None
 
 
 class OperationalMetricsModel(BaseModel):
@@ -65,6 +66,8 @@ class OperationalMetricsModel(BaseModel):
     latency_p95_ms: float
     latency_p99_ms: float
     est_cost_per_1k_usd: float
+    est_cost_per_1k_min_usd: float = 0.0
+    est_cost_per_1k_max_usd: float = 0.0
 
 
 class HealthStatusModel(BaseModel):

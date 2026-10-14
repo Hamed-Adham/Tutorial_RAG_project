@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvaluationAPIContract",
+  "description": "REST API contract for frontend-triggered evaluation runs and live measurement polling",
+  "type": "object",
+  "definitions": {
+    "EvaluationRunRequest": {
+      "type": "object",
+      "properties": {
+        "suite": {
+          "type": ["string", "null"],
+          "enum": [
+            "science_curriculum",
+            "administrative_faq",
+            "conversational_memory",
+            "subquery_decomposition",
+            "adversarial_refusal",
+            null
+          ]
+        },
+        "split": {
+          "type": "string",
+          "enum": ["dev", "test"],
+          "default": "dev"
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["end_to_end", "retrieve_only", "synthesis_only", "gates_only"],
+          "default": "end_to_end"
+        },
+        "judge_model": {
+          "type": "string",
+          "enum": ["subq", "jev", "gemini_llm"],
+          "default": "subq"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 10
+        }
+      }
+    },
+    "EvaluationRunResponse": {
+      "type": "object",
+      "required": ["run_id", "status"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["queued", "running", "completed", "failed"] },
+        "message": { "type": "string" }
+      }
+    },
+    "EvaluationStatusResponse": {
+      "type": "object",
+      "required": ["run_id", "status", "progress_percentage", "total_items", "processed_items"],
+      "properties": {
+        "run_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["queued", "running", "completed", "failed"] },
+        "progress_percentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "total_items": { "type": "integer" },
+        "processed_items": { "type": "integer" },
+        "current_item_query": { "type": ["string", "null"] },
+        "elapsed_seconds": { "type": "number" },
+        "report": { "type": ["object", "null"] },
+        "error": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

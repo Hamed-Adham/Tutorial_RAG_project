@@ -22,6 +22,7 @@ Constitution v1.2.0:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -76,6 +77,9 @@ class SynthesisResult:
     context_block: str = ""
     """Context block embedded within the user message."""
 
+    q_and_a_summary: Optional[str] = None
+    """Structured summary of the Q&A turn for conversational memory (Feature 006)."""
+
 
 # ---------------------------------------------------------------------------
 # Context builder
@@ -86,9 +90,11 @@ def _build_context_block(chunks: List[Any], max_chars: int = 6000) -> str:
     """
     Format retrieved chunks into a numbered <context> block for the prompt.
 
-    Each chunk is prefixed with its breadcrumb and page number.
+    Each chunk is prefixed with its clean Persian chapter, page number, and breadcrumb.
     Context is truncated at *max_chars* to stay within the LLM context window.
     """
+    from rag_core.postprocessing.citations import DOC_TO_CHAPTER
+
     parts = []
     total = 0
     for i, chunk in enumerate(chunks, start=1):
@@ -96,18 +102,105 @@ def _build_context_block(chunks: List[Any], max_chars: int = 6000) -> str:
             text = chunk.get("text", "")
             page = chunk.get("page", 0)
             breadcrumb = chunk.get("breadcrumb", "")
+            doc_id = chunk.get("doc_id", "") or chunk.get("filename", "")
         else:
             text = getattr(chunk, "text", "")
             page = getattr(chunk, "page", 0)
             breadcrumb = getattr(chunk, "breadcrumb", "")
+            doc_id = getattr(chunk, "doc_id", "") or getattr(chunk, "filename", "")
 
-        entry = f"[{i}] (p.{page}) {breadcrumb}\n{text}" if breadcrumb else f"[{i}] (p.{page})\n{text}"
+        pdf_key = doc_id if doc_id.endswith(".pdf") else f"{doc_id}.pdf"
+        ch_info = DOC_TO_CHAPTER.get(pdf_key)
+        if ch_info:
+            ch_num, ch_title = ch_info
+            loc_label = f"فصل {ch_num} ({ch_title})، صفحه {page}" if page else f"فصل {ch_num} ({ch_title})"
+        else:
+            loc_label = f"صفحه {page}" if page else "کتاب درسی"
+
+        header = f"[{i}] ({loc_label}) - {breadcrumb}" if breadcrumb else f"[{i}] ({loc_label})"
+        entry = f"{header}\n{text}"
         if total + len(entry) > max_chars:
             break
         parts.append(entry)
         total += len(entry)
 
     return "\n\n---\n\n".join(parts)
+
+def sanitize_math_markup(text: str) -> str:
+    """
+    Strip and convert raw LaTeX syntax and messy formula artifacts into clean,
+    readable plain text, unicode symbols, and bold markdown.
+    """
+    if not text:
+        return ""
+    import re
+
+    # 1. Convert LaTeX text/style wrappers
+    t = re.sub(r"\\(?:text|mathrm|operatorname)\{([^}]+)\}", r"\1", text)
+    t = re.sub(r"\\mathbf\{([^}]+)\}", r"**\1**", t)
+    t = re.sub(r"\\mathit\{([^}]+)\}", r"*\1*", t)
+
+    # 2. Fractions \frac{A}{B} -> A / B
+    for _ in range(3):
+        t = re.sub(r"\\frac\{([^{}]+)\}\{([^{}]+)\}", r"(\1 / \2)", t)
+    t = re.sub(r"=\s*\(([^\/()]+)\s*\/\s*([^\/()]+)\)", r"= \1 / \2", t)
+
+    # 3. Greek and scientific symbols
+    symbols = {
+        r"\\rho\b": "ρ",
+        r"\\Delta\b": "Δ",
+        r"\\delta\b": "δ",
+        r"\\pi\b": "π",
+        r"\\alpha\b": "α",
+        r"\\beta\b": "β",
+        r"\\gamma\b": "γ",
+        r"\\theta\b": "θ",
+        r"\\lambda\b": "λ",
+        r"\\mu\b": "μ",
+        r"\\sigma\b": "σ",
+        r"\\omega\b": "ω",
+        r"\\times\b": "×",
+        r"\\cdot\b": "·",
+        r"\\approx\b": "≈",
+        r"\\pm\b": "±",
+        r"\\leq?\b": "≤",
+        r"\\geq?\b": "≥",
+        r"\\neq?\b": "≠",
+        r"\\degree\b": "°",
+    }
+    for pat, rep in symbols.items():
+        t = re.sub(pat, rep, t)
+
+    # 4. Superscripts
+    t = t.replace("^2", "²").replace("^3", "³").replace("^{2}", "²").replace("^{3}", "³")
+
+    # 5. Block math $$...$$
+    t = re.sub(r"\$\$([\s\S]*?)\$\$", lambda m: f" **{m.group(1).strip()}** " if m.group(1).strip() else "", t)
+
+    # 6. Inline math $...$ or $...\$
+    def _clean_inline(m: re.Match) -> str:
+        c = m.group(1).replace("\\", "").strip()
+        if c == "rho":
+            c = "ρ"
+        elif c == "pi":
+            c = "π"
+        return f"**{c}**" if c else ""
+
+    t = re.sub(r"(?:\$|\\\$)+([^\n$]+?)(?:\\*\$)+", _clean_inline, t)
+
+    # 7. Stray backslashes
+    t = re.sub(r"\\([a-zA-Z]+)", lambda m: "ρ" if m.group(1) == "rho" else ("π" if m.group(1) == "pi" else m.group(1)), t)
+    t = re.sub(r"\\([$()\[\]{}*\/=+\-])", r"\1", t)
+
+    # 8. Fix floating lone bullets
+    t = re.sub(r"(?:^|\n)\s*[•\-\*]\s*\n+(?=[^\n])", r"\n• ", t)
+    t = re.sub(r"(?:^|\n)\s*[•\-\*]\s*(?=\n|$)", r"", t)
+
+    # 9. Normalize spaces around division slashes between digits and clean excessive spaces
+    t = re.sub(r"(\d+)\s*/\s*(\d+)", r"\1 / \2", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +241,7 @@ class ResponseSynthesizer:
         model: Optional[str] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 3072,
         temperature: float = 0.0,
         context_max_chars: int = 6000,
         tracker: Optional[Any] = None,
@@ -156,10 +249,10 @@ class ResponseSynthesizer:
         from rag_core.config import Settings
         settings = Settings()
 
-        self._model = model or settings.llm_model or "open-code"
+        self._model = model or settings.llm_model or "RAG-synthesizer"
         self._base_url = base_url or settings.nine_router_base_url or "http://localhost:20128/v1"
         self._api_key = api_key if (api_key and api_key != "none") else (settings.nine_router_api_key or "none")
-        self._max_tokens = max_tokens
+        self._max_tokens = int(os.getenv("SYNTHESIZER_MAX_TOKENS", str(max_tokens)))
         self._temperature = temperature
         self._context_max_chars = context_max_chars
         self._tracker = tracker
@@ -175,6 +268,8 @@ class ResponseSynthesizer:
             self._async_client = AsyncOpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
+                timeout=30.0,
+                max_retries=1,
             )
         return self._async_client
 
@@ -184,11 +279,14 @@ class ResponseSynthesizer:
         chunks: List[Any],
         system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncIterator[str]:
         """
         Stream the grounded response token by token as an asynchronous generator.
         Yields individual text tokens as they arrive from the LLM.
         """
+        import asyncio
+
         # Handle empty context — immediate fallback
         if not chunks:
             yield ANSWER_NOT_FOUND
@@ -201,14 +299,20 @@ class ResponseSynthesizer:
         else:
             user_message = f"<context>\n{context_block}\n</context>\n\nQuestion: {query}"
 
+        messages = [{"role": "system", "content": sys_prompt}]
+        if history:
+            for turn in history[-4:]:
+                r = turn.get("role", "user")
+                c = turn.get("content", "")
+                if r in ("user", "assistant") and c:
+                    messages.append({"role": r, "content": c})
+        messages.append({"role": "user", "content": user_message})
+
         try:
             client = self._get_async_client()
             stream = await client.chat.completions.create(
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_message},
-                ],
+                messages=messages,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
                 stream=True,
@@ -217,8 +321,39 @@ class ResponseSynthesizer:
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except Exception as exc:
-            logger.warning("Streaming synthesis failed: %s, falling back to static text", exc)
-            yield f"بر اساس متون استخراج شده:\n{context_block[:300]}..."
+            logger.error("Streaming synthesis failed: %s", exc, exc_info=True)
+            yield f"⚠️ متأسفانه در فرآیند تولید پاسخ هوشمند خطایی رخ داد ({type(exc).__name__}: {exc}). لطفاً ارتباط با مدل لوکال را بررسی فرمایید."
+
+
+
+    @staticmethod
+    def parse_answer_and_summary(raw_text: str) -> tuple[str, Optional[str]]:
+        """
+        Extract clean answer and structured <!-- SUMMARY --> tag content if present.
+        """
+        import re
+        if not raw_text:
+            return "", None
+
+        match = re.search(r"<!--\s*SUMMARY\s*-->([\s\S]*?)<!--\s*/SUMMARY\s*-->", raw_text, re.IGNORECASE)
+        if match:
+            summary = match.group(1).strip()
+            summary = re.sub(r"دستورالعمل ثبت خلاصه[^\n]*\n+", "", summary, flags=re.IGNORECASE).strip()
+            summary = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", summary, flags=re.IGNORECASE).strip()
+
+            clean_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<!--\s*SUMMARY\s*-->[\s\S]*?<!--\s*/SUMMARY\s*-->", "", raw_text, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"دستورالعمل ثبت خلاصه در حافظه[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            return clean_answer, summary
+
+        # Alternative Persian marker: ### خلاصه / خلاصه گفت‌وگو:
+        match_fa = re.search(r"(?:###|---)\s*(?:خلاصه|خلاصه پرسش و پاسخ|خلاصه گفت‌وگو|خلاصه گفتگو)\s*[:\s]*(?:###|---)?\s*[\n]([\s\S]*)$", raw_text)
+        if match_fa:
+            summary = match_fa.group(1).strip()
+            clean_answer = raw_text[:match_fa.start()].strip()
+            return clean_answer, summary
+
+        return raw_text, None
 
     def synthesize(
         self,
@@ -226,6 +361,7 @@ class ResponseSynthesizer:
         chunks: List[Any],
         system_prompt: Optional[str] = None,
         session_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> SynthesisResult:
         """
         Generate a grounded answer for *query* using *chunks* as context.
@@ -235,6 +371,7 @@ class ResponseSynthesizer:
             chunks:        Retrieved ``RetrievedChunk``-compatible objects or dicts.
             system_prompt: Override the default grounding system prompt.
             session_id:    Optional session ID for Langfuse tracing.
+            history:       Optional prior dialogue turns for context memory.
 
         Returns:
             ``SynthesisResult`` with answer text, token counts, and latency.
@@ -256,6 +393,7 @@ class ResponseSynthesizer:
                 full_prompt="",
                 system_prompt=system_prompt or SYSTEM_PROMPT_GROUNDED,
                 context_block="",
+                q_and_a_summary=None,
             )
 
         context_block = _build_context_block(chunks, self._context_max_chars)
@@ -267,20 +405,28 @@ class ResponseSynthesizer:
 
         full_prompt = f"System:\n{sys_prompt}\n\nUser:\n{user_message}"
 
+        messages = [{"role": "system", "content": sys_prompt}]
+        if history:
+            for turn in history[-4:]:
+                r = turn.get("role", "user")
+                c = turn.get("content", "")
+                if r in ("user", "assistant") and c:
+                    messages.append({"role": r, "content": c})
+        messages.append({"role": "user", "content": user_message})
+
         # Attempt LLM call
         try:
             client = self._get_client()
             response = client.chat.completions.create(
                 model=self._model,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_message},
-                ],
+                messages=messages,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
             )
 
-            answer_text = response.choices[0].message.content.strip()
+            raw_text = response.choices[0].message.content.strip()
+            clean_content, parsed_summary = self.parse_answer_and_summary(raw_text)
+            answer_text = sanitize_math_markup(clean_content)
             usage = response.usage
 
             latency = time.perf_counter() - t_start
@@ -306,6 +452,8 @@ class ResponseSynthesizer:
                 is_fallback,
             )
 
+            summary_val = parsed_summary or (answer_text[:250].strip() if not is_fallback else None)
+
             return SynthesisResult(
                 answer=full_answer,
                 is_fallback=is_fallback,
@@ -315,10 +463,11 @@ class ResponseSynthesizer:
                 completion_tokens=getattr(usage, "completion_tokens", 0),
                 total_tokens=getattr(usage, "total_tokens", 0),
                 citations_text=citation_bundle.inline_text,
-                raw_completion=answer_text,
+                raw_completion=raw_text,
                 full_prompt=full_prompt,
                 system_prompt=sys_prompt,
                 context_block=context_block,
+                q_and_a_summary=summary_val,
             )
 
         except ImportError:
@@ -357,6 +506,8 @@ class ResponseSynthesizer:
             self._client = OpenAI(
                 api_key=self._api_key,
                 base_url=self._base_url,
+                timeout=30.0,
+                max_retries=1,
             )
         return self._client
 
