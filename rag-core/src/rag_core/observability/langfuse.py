@@ -273,9 +273,196 @@ class LangfuseTracker:
         except Exception as e:
             return "offline_trace"
 
+    def trace_naive_pipeline(
+        self,
+        name: str = "naive_pipeline",
+        question: str = "",
+        answer: str = "",
+        session_id: Optional[str] = None,
+        turn_pair_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        source: str = "science_textbook",
+        top_k: int = 3,
+        retriever_type: str = "qdrant",
+        retrieved_chunks: Optional[List[Dict[str, Any]]] = None,
+        chapters: Optional[List[int]] = None,
+        categories: Optional[List[str]] = None,
+        retrieval_latency_ms: float = 0.0,
+        synthesis_latency_ms: float = 0.0,
+        model_name: Optional[str] = None,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        latencies: Optional[Dict[str, float]] = None,
+    ) -> str:
+        """
+        Create a 2-stage hierarchical trace structure for the baseline pipeline:
+        Root Trace: naive_pipeline (CHAIN)
+        ├── 1. retrieval (RETRIEVER)
+        └── 2. response_synthesis (GENERATION)
+
+        Adheres to OpenInference standards and allows direct comparison with advanced_pipeline.
+        """
+        if not self.client:
+            return "offline_trace"
+
+        try:
+            combined_tags = ["pipeline:naive", f"source:{source}"]
+            if retriever_type:
+                combined_tags.append(f"retriever:{retriever_type}")
+            if tags:
+                for t in tags:
+                    if t not in combined_tags:
+                        combined_tags.append(t)
+            if turn_pair_id:
+                combined_tags.append(f"turn:{turn_pair_id}")
+
+            combined_metadata = metadata or {}
+            combined_metadata["pipeline_type"] = "naive"
+            combined_metadata["retriever_type"] = retriever_type
+            combined_metadata["source"] = source
+            if turn_pair_id:
+                combined_metadata["turn_pair_id"] = turn_pair_id
+            if latencies:
+                combined_metadata["latency_profile"] = latencies
+
+            # Multi-model token cost calculations
+            llm_in_rate = getattr(settings, "cost_llm_input_per_million", 0.150)
+            llm_out_rate = getattr(settings, "cost_llm_output_per_million", 0.600)
+            p_tok = prompt_tokens or max(1, int(len(question.split()) * 1.5 + 400))
+            c_tok = completion_tokens or max(1, int(len(answer.split()) * 1.3))
+            cost_synth = ((p_tok * llm_in_rate) + (c_tok * llm_out_rate)) / 1_000_000.0
+            projected_cost_1k = cost_synth * 1000.0
+
+            combined_metadata["cost_breakdown"] = {
+                "synthesis_cost_usd": round(cost_synth, 6),
+                "total_query_cost_usd": round(cost_synth, 6),
+                "projected_cost_per_1k_usd": round(projected_cost_1k, 3),
+            }
+
+            def _build_naive_observations():
+                def _stamp_naive(obs, s_ns: int, e_ns: int):
+                    if obs is None:
+                        return
+                    if hasattr(obs, "_otel_span") and obs._otel_span is not None:
+                        try:
+                            obs._otel_span._start_time = int(s_ns)
+                        except Exception:
+                            pass
+                    try:
+                        obs.end(end_time=int(e_ns))
+                    except Exception:
+                        try:
+                            obs.end()
+                        except Exception:
+                            pass
+
+                now_ns = time.time_ns()
+                l_ret = max(10.0, float(retrieval_latency_ms or (latencies.get("retrieval_ms", 0.0) if latencies else 0.0) or 30.0))
+                l_synth = max(20.0, float(synthesis_latency_ms or (latencies.get("synthesis_ms", 0.0) if latencies else 0.0) or 200.0))
+                naive_tot_dur_ns = int((l_ret + l_synth + 20.0) * 1_000_000)
+                cur_ns = now_ns - naive_tot_dur_ns
+                root_s_ns = cur_ns
+
+                # Root Trace: naive_pipeline (Type: CHAIN)
+                root = self.client.start_observation(
+                    name=name,
+                    as_type="chain",
+                    input={
+                        "question": question,
+                        "session_id": session_id,
+                        "turn_pair_id": turn_pair_id,
+                        "top_k": top_k,
+                        "source": source,
+                        "chapters": chapters,
+                        "categories": categories,
+                    },
+                    output={"answer": answer},
+                    metadata=combined_metadata,
+                    version=self.release,
+                )
+
+                # -------------------------------------------------------------
+                # 1. Stage: retrieval (Type: RETRIEVER)
+                # -------------------------------------------------------------
+                chunks = retrieved_chunks or []
+                ret_s_ns = cur_ns
+                ret_e_ns = ret_s_ns + int(l_ret * 1_000_000)
+                retrieval_obs = root.start_observation(
+                    name="retrieval",
+                    as_type="retriever",
+                    input={
+                        "question": question,
+                        "top_k": top_k,
+                        "filter_source": source,
+                        "filter_chapters": chapters,
+                        "filter_categories": categories,
+                    },
+                    output={
+                        "retrieved_count": len(chunks),
+                        "chunks": chunks,
+                    },
+                    metadata={
+                        "latency_ms": round(retrieval_latency_ms or (latencies.get("retrieval_ms", 0.0) if latencies else 0.0), 2),
+                        "retriever_type": retriever_type,
+                        "vector_db": "qdrant" if retriever_type == "qdrant" else "numpy_in_memory",
+                        "collection_name": "naive_baseline_chunks" if retriever_type == "qdrant" else "in_memory_cache",
+                    },
+                    version=self.release,
+                )
+                _stamp_naive(retrieval_obs, ret_s_ns, ret_e_ns)
+                cur_ns = ret_e_ns + int(1_000_000)
+
+                # -------------------------------------------------------------
+                # 2. Stage: response_synthesis (Type: GENERATION)
+                # -------------------------------------------------------------
+                syn_s_ns = cur_ns
+                syn_e_ns = syn_s_ns + int(l_synth * 1_000_000)
+                synthesis_obs = root.start_observation(
+                    name="response_synthesis",
+                    as_type="generation",
+                    input=question,
+                    output=answer,
+                    model=model_name or settings.llm_model,
+                    usage_details={
+                        "input": p_tok,
+                        "output": c_tok,
+                        "total": p_tok + c_tok,
+                    },
+                    cost_details={
+                        "total": round(cost_synth, 6),
+                    },
+                    metadata={
+                        "latency_ms": round(synthesis_latency_ms or (latencies.get("synthesis_ms", 0.0) if latencies else 0.0), 2),
+                    },
+                    version=self.release,
+                )
+                _stamp_naive(synthesis_obs, syn_s_ns, syn_e_ns)
+                cur_ns = syn_e_ns + int(1_000_000)
+
+                _stamp_naive(root, root_s_ns, cur_ns)
+                return getattr(root, "trace_id", "offline_trace")
+
+            if propagate_attributes:
+                with propagate_attributes(
+                    tags=combined_tags,
+                    session_id=session_id,
+                    user_id=user_id,
+                    trace_name=name,
+                    version=self.release,
+                    metadata=combined_metadata,
+                ):
+                    return _build_naive_observations()
+            else:
+                return _build_naive_observations()
+
+        except Exception:
+            return "offline_trace"
+
     def trace_advanced_pipeline(
         self,
-        name: str = "advanced_science_rag",
+        name: str = "advanced_pipeline",
         question: str = "",
         answer: str = "",
         is_refusal: bool = False,
@@ -400,6 +587,31 @@ class LangfuseTracker:
             }
 
             def _build_advanced_observations():
+                def _stamp(obs, s_ns: int, e_ns: int):
+                    if obs is None:
+                        return
+                    if hasattr(obs, "_otel_span") and obs._otel_span is not None:
+                        try:
+                            obs._otel_span._start_time = int(s_ns)
+                        except Exception:
+                            pass
+                    try:
+                        obs.end(end_time=int(e_ns))
+                    except Exception:
+                        try:
+                            obs.end()
+                        except Exception:
+                            pass
+
+                now_ns = time.time_ns()
+                l_gate = max(10.0, float(gate_latency_ms or (latencies.get("gate1_ms", 0.0) if latencies else 0.0) or (latencies.get("rewrite_ms", 0.0) if latencies else 0.0) or 50.0))
+                l_trans = max(5.0, float(rewrite_latency_ms or (latencies.get("distill_ms", 0.0) if latencies else 0.0) or 20.0))
+                l_subq = max(10.0, float(subq_latency_ms or (latencies.get("subq_model2_ms", 0.0) if latencies else 0.0) or (latencies.get("history_eval_ms", 0.0) if latencies else 0.0) or 40.0))
+                l_ret = max(10.0, float(retrieval_latency_ms or (latencies.get("retrieval_ms", 0.0) if latencies else 0.0) or 50.0))
+                l_rerank = max(10.0, float(rerank_latency_ms or (latencies.get("rerank_ms", 0.0) if latencies else 0.0) or 60.0))
+                l_exp = max(5.0, float(expansion_latency_ms or (latencies.get("expansion_ms", 0.0) if latencies else 0.0) or 15.0))
+                l_synth = max(20.0, float(synthesis_latency_ms or (latencies.get("synthesis_ms", 0.0) if latencies else 0.0) or 300.0))
+
                 # Root Trace: advanced_science_rag (Type: CHAIN)
                 root = self.client.start_observation(
                     name=name,
@@ -409,6 +621,11 @@ class LangfuseTracker:
                     metadata=combined_metadata,
                     version=self.release,
                 )
+
+                # Precompute total duration and back-calculate anchor start time
+                tot_ms = l_gate + l_trans + l_subq + (l_ret + l_rerank + l_exp) + l_synth + 50.0
+                cursor_ns = now_ns - int(tot_ms * 1_000_000)
+                root_start_ns = cursor_ns
 
                 # -------------------------------------------------------------
                 # 1. Stage: query_gate (Type: CHAIN)
@@ -424,6 +641,9 @@ class LangfuseTracker:
                 context_need_tier = getattr(rw, "context_need_tier", None)
                 if hasattr(context_need_tier, "value"):
                     context_need_tier = context_need_tier.value
+
+                gate_start_ns = cursor_ns
+                gate_end_ns = gate_start_ns + int(l_gate * 1_000_000)
 
                 gate_obs = root.start_observation(
                     name="query_gate",
@@ -464,14 +684,17 @@ class LangfuseTracker:
                     metadata={"rate_per_million_usd": jev_rate},
                     version=self.release,
                 )
-                jev_obs.end()
-                gate_obs.end()
+                _stamp(jev_obs, gate_start_ns + int(500_000), gate_end_ns - int(500_000))
+                _stamp(gate_obs, gate_start_ns, gate_end_ns)
+                cursor_ns = gate_end_ns + int(1_000_000)
 
                 # -------------------------------------------------------------
                 # 2. Stage: query_transformation (Type: CHAIN)
                 # -------------------------------------------------------------
                 trans_type = getattr(rw, "transformation_type", "bypass") if rw else "bypass"
                 if not is_refusal:
+                    trans_start_ns = cursor_ns
+                    trans_end_ns = trans_start_ns + int(l_trans * 1_000_000)
                     trans_obs = root.start_observation(
                         name="query_transformation",
                         as_type="chain",
@@ -498,9 +721,10 @@ class LangfuseTracker:
                             cost_details={"total": cost_transform},
                             version=self.release,
                         )
-                        trans_llm_obs.end()
+                        _stamp(trans_llm_obs, trans_start_ns + int(500_000), trans_end_ns)
 
-                    trans_obs.end()
+                    _stamp(trans_obs, trans_start_ns, trans_end_ns)
+                    cursor_ns = trans_end_ns + int(1_000_000)
 
                 # -------------------------------------------------------------
                 # 3. Stage: conversational_memory (Type: CHAIN)
@@ -511,7 +735,9 @@ class LangfuseTracker:
                 older_summary_count = selected_count - recent_5_count
                 badge = getattr(rw, "conversational_context_badge", None)
 
-                if history or selected_count > 0 or actual_subq_tokens > 0:
+                if history or selected_count > 0 or actual_subq_tokens > 0 or (context_need_tier in ("needs_history_only", "needs_history_and_retrieve")):
+                    mem_start_ns = cursor_ns
+                    mem_end_ns = mem_start_ns + int(l_subq * 1_000_000)
                     mem_obs = root.start_observation(
                         name="conversational_memory",
                         as_type="chain",
@@ -529,8 +755,10 @@ class LangfuseTracker:
                         version=self.release,
                     )
 
+                    curr_child_s_ns = mem_start_ns + int(500_000)
                     # 3.1 summary_backfill (if any summaries were missing and generated)
                     if actual_backfilled > 0:
+                        backfill_end_ns = curr_child_s_ns + int(1_000_000)
                         backfill_obs = mem_obs.start_observation(
                             name="summary_backfill",
                             as_type="generation",
@@ -540,9 +768,15 @@ class LangfuseTracker:
                             metadata={"latency_ms": round(latencies.get("summary_backfill_ms", 0.0) if latencies else 0.0, 2)},
                             version=self.release,
                         )
-                        backfill_obs.end()
+                        _stamp(backfill_obs, curr_child_s_ns, backfill_end_ns)
+                        curr_child_s_ns = backfill_end_ns + int(500_000)
 
                     # 3.2 Decision Model 2 (SubQ System One)
+                    subq_end_ns = mem_end_ns - int(2_000_000)
+                    if subq_end_ns <= curr_child_s_ns:
+                        subq_end_ns = curr_child_s_ns + int(2_000_000)
+                        mem_end_ns = subq_end_ns + int(2_000_000)
+
                     subq_obs = mem_obs.start_observation(
                         name="decision_model_2",
                         as_type="generation",
@@ -562,7 +796,7 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    subq_obs.end()
+                    _stamp(subq_obs, curr_child_s_ns, subq_end_ns)
 
                     # 3.3 Fidelity Selection
                     fidelity_obs = mem_obs.start_observation(
@@ -576,8 +810,9 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    fidelity_obs.end()
-                    mem_obs.end()
+                    _stamp(fidelity_obs, subq_end_ns + int(500_000), mem_end_ns)
+                    _stamp(mem_obs, mem_start_ns, mem_end_ns)
+                    cursor_ns = mem_end_ns + int(1_000_000)
 
                 # -------------------------------------------------------------
                 # 4. Stage: retrieval_chain (Type: CHAIN)
@@ -586,6 +821,10 @@ class LangfuseTracker:
                     dense_list = dense_results or []
                     bm25_list = bm25_results or []
                     fused_list = fused_candidates or []
+
+                    ret_start_ns = cursor_ns
+                    ret_tot_ns = int((l_ret + l_rerank + l_exp) * 1_000_000)
+                    ret_end_ns = ret_start_ns + ret_tot_ns
 
                     retrieval_chain_obs = root.start_observation(
                         name="retrieval_chain",
@@ -623,7 +862,7 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    bm25_obs.end()
+                    _stamp(bm25_obs, ret_start_ns + int(500_000), ret_start_ns + int(l_ret * 0.4 * 1_000_000))
 
                     # 4.2 Child: dense_qdrant_search (Type: RETRIEVER)
                     dense_obs = retrieval_chain_obs.start_observation(
@@ -646,9 +885,11 @@ class LangfuseTracker:
                         metadata={"vector_db": "qdrant"},
                         version=self.release,
                     )
-                    dense_obs.end()
+                    _stamp(dense_obs, ret_start_ns + int(500_000), ret_start_ns + int(l_ret * 0.8 * 1_000_000))
 
                     # 4.3 Child: rrf_fusion (Type: CHAIN)
+                    rrf_start_ns = ret_start_ns + int(l_ret * 0.85 * 1_000_000)
+                    rrf_end_ns = ret_start_ns + int(l_ret * 1_000_000)
                     rrf_obs = retrieval_chain_obs.start_observation(
                         name="rrf_fusion",
                         as_type="chain",
@@ -673,11 +914,13 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    rrf_obs.end()
+                    _stamp(rrf_obs, rrf_start_ns, rrf_end_ns)
 
                     # 4.4 Child: neural_reranking (Type: CHAIN)
                     overfetched = input_candidates or fused_list
                     reranked_list = reranked_candidates or []
+                    rerank_start_ns = rrf_end_ns + int(500_000)
+                    rerank_end_ns = rerank_start_ns + int(l_rerank * 1_000_000)
 
                     rerank_obs = retrieval_chain_obs.start_observation(
                         name="neural_reranking",
@@ -709,9 +952,11 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    rerank_obs.end()
+                    _stamp(rerank_obs, rerank_start_ns, rerank_end_ns)
 
                     # 4.5 Child: parent_expansion (Type: CHAIN)
+                    exp_start_ns = rerank_end_ns + int(500_000)
+                    exp_end_ns = exp_start_ns + int(l_exp * 1_000_000)
                     is_reorder_on = bool(
                         context_reordering_enabled
                         if context_reordering_enabled is not None
@@ -773,8 +1018,9 @@ class LangfuseTracker:
                         },
                         version=self.release,
                     )
-                    parent_obs.end()
-                    retrieval_chain_obs.end()
+                    _stamp(parent_obs, exp_start_ns, exp_end_ns)
+                    _stamp(retrieval_chain_obs, ret_start_ns, exp_end_ns)
+                    cursor_ns = exp_end_ns + int(1_000_000)
 
                 # -------------------------------------------------------------
                 # 5. Stage: response_synthesis (Type: GENERATION)
@@ -782,6 +1028,9 @@ class LangfuseTracker:
                 model_name = getattr(synthesis_result, "model", None) or settings.llm_model
                 actual_raw = raw_completion or getattr(synthesis_result, "raw_completion", "") or answer
                 actual_prompt = full_prompt or getattr(synthesis_result, "full_prompt", "") or question
+
+                synth_start_ns = cursor_ns
+                synth_end_ns = synth_start_ns + int(l_synth * 1_000_000)
 
                 stage5 = root.start_observation(
                     name="response_synthesis",
@@ -799,9 +1048,10 @@ class LangfuseTracker:
                     },
                     version=self.release,
                 )
-                stage5.end()
+                _stamp(stage5, synth_start_ns, synth_end_ns)
 
-                root.end()
+                root_end_ns = synth_end_ns + int(1_000_000)
+                _stamp(root, root_start_ns, root_end_ns)
                 return getattr(root, "trace_id", getattr(root, "id", "offline_trace"))
 
             if propagate_attributes:

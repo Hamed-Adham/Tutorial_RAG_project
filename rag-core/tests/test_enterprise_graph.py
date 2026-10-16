@@ -337,3 +337,78 @@ async def test_enterprise_graph_retrieval_augmented_with_needed_summaries(mock_s
     assert len(graph_pipe.get_citations_for_session("sess_us4_1")) > 0
 
 
+@pytest.mark.asyncio
+async def test_recent_5_vs_older_history_context_injection():
+    """Verify that recent 5 messages inject full context (Q&A), older messages inject summary only,
+    and deterministic fallback with summary injects summary only without combining all 3."""
+    from rag_core.indexing.science_schema import (
+        SelectedHistoryItem,
+        HistoryRelevanceTier,
+        format_history_turn_for_context,
+    )
+
+    # 1. Recent-5 message: Selected by DC Model 2 -> Full context (Q&A), NO summary
+    recent_item = SelectedHistoryItem(
+        turn_id="turn_rec_1",
+        turn_index=18,
+        is_recent_5=True,
+        content_type="full_text",
+        question="سلول چیست؟",
+        answer="واحد ساختمانی جانداران است.",
+        summary="تعریف سلول و اجزای آن",
+        relevance_tier=HistoryRelevanceTier.NEEDED_RELEVANT,
+    )
+    formatted_recent = format_history_turn_for_context(recent_item)
+    assert "پرسش پیشین کاربر: سلول چیست؟" in formatted_recent
+    assert "پاسخ سیستم به پرسش پیشین: واحد ساختمانی جانداران است." in formatted_recent
+    assert "تعریف سلول و اجزای آن" not in formatted_recent  # Summary MUST NOT be combined!
+
+    # 2. Older message (>5 turns away): Selected by DC Model 2 -> Summary ONLY, NO Q&A
+    older_item = SelectedHistoryItem(
+        turn_id="turn_old_1",
+        turn_index=2,
+        is_recent_5=False,
+        content_type="summary",
+        question="گیاهان چگونه تنفس می‌کنند؟",
+        answer="از طریق روزنه‌ها و فتوسنتز تبادل گاز انجام می‌دهند.",
+        summary="تنفس و فتوسنتز گیاهان از طریق روزنه‌ها",
+        relevance_tier=HistoryRelevanceTier.NEEDED_RELEVANT,
+    )
+    formatted_older = format_history_turn_for_context(older_item)
+    assert formatted_older == "خلاصه گفتگوی پیشین: تنفس و فتوسنتز گیاهان از طریق روزنه‌ها"
+    assert "گیاهان چگونه تنفس می‌کنند؟" not in formatted_older
+    assert "واحد ساختمانی" not in formatted_older
+
+    # 3. Fallback Turn: Candidate turns fallback with summary -> Summary ONLY
+    fallback_with_summary = SelectedHistoryItem(
+        turn_id="turn_fallback_1",
+        turn_index=19,
+        is_recent_5=True,
+        content_type="summary",
+        question="چرخه آب چیست؟",
+        answer="تبخیر، میعان و بارش چرخه آب را تشکیل می‌دهند.",
+        summary="چرخه آب شامل تبخیر و بارش",
+        relevance_tier=HistoryRelevanceTier.NEEDED_RELEVANT,
+    )
+    formatted_fallback = format_history_turn_for_context(fallback_with_summary)
+    assert formatted_fallback == "خلاصه گفتگوی پیشین: چرخه آب شامل تبخیر و بارش"
+    assert "چرخه آب چیست؟" not in formatted_fallback
+    assert "تبخیر، میعان" not in formatted_fallback
+
+    # 4. Fallback Turn without summary -> Graceful fallback to Q&A
+    fallback_no_summary = SelectedHistoryItem(
+        turn_id="turn_fallback_2",
+        turn_index=19,
+        is_recent_5=True,
+        content_type="full_text",
+        question="فشار هوا چیست؟",
+        answer="نیرویی که هوا بر یکای سطح وارد می‌کند.",
+        summary=None,
+        relevance_tier=HistoryRelevanceTier.NEEDED_RELEVANT,
+    )
+    formatted_fallback_no_sum = format_history_turn_for_context(fallback_no_summary)
+    assert "پرسش پیشین کاربر: فشار هوا چیست؟" in formatted_fallback_no_sum
+    assert "پاسخ سیستم به پرسش پیشین: نیرویی که هوا بر یکای سطح وارد می‌کند." in formatted_fallback_no_sum
+
+
+

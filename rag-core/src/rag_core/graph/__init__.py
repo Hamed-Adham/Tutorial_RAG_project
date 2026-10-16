@@ -2,6 +2,7 @@
 from rag_core.graph.state import RAGGraphState
 from rag_core.graph.nodes import (
     create_guard_and_route_node,
+    create_level0_source_router_node,
     refusal_node,
     create_retrieve_node,
     create_rerank_node,
@@ -21,6 +22,7 @@ __all__ = [
     "LangGraphRAGPipeline",
     "EnterpriseScienceGraph",
     "create_guard_and_route_node",
+    "create_level0_source_router_node",
     "refusal_node",
     "create_retrieve_node",
     "create_rerank_node",

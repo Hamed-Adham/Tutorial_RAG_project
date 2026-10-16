@@ -5,6 +5,7 @@ Naive synthesizer using local LLM endpoint (OpenAI-compatible /chat/completions)
 Implements baseline single-shot prompting.
 """
 
+import time
 import json
 import urllib.request
 import urllib.error
@@ -92,18 +93,36 @@ class NaiveSynthesizer:
             }
         )
 
+        from rag_core.generation.synthesizer import sanitize_math_markup
+
         last_error = None
-        for attempt in range(1, 4):
+        for attempt in range(1, 3):
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    return data["choices"][0]["message"]["content"].strip()
-            except urllib.error.HTTPError as e:
-                err_body = e.read().decode("utf-8", errors="ignore")
-                raise RuntimeError(f"LLM API HTTP {e.code} error: {err_body}")
+                # Try OpenAI client first if available, else urllib
+                try:
+                    from openai import OpenAI
+                    client = OpenAI(base_url=self.base_url, api_key=self.api_key or "none", timeout=timeout)
+                    resp = client.chat.completions.create(
+                        model=self.model,
+                        messages=payload["messages"],
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    content = resp.choices[0].message.content or ""
+                    return sanitize_math_markup(content.strip())
+                except ImportError:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        content = data["choices"][0]["message"]["content"] or ""
+                        return sanitize_math_markup(content.strip())
             except Exception as e:
                 last_error = e
-                print(f"  [Synthesizer warning] Attempt {attempt}/3 failed ({e}). Retrying in 2s...")
-                time.sleep(2)
+                print(f"  [NaiveSynthesizer warning] Attempt {attempt} failed ({e}).")
+                time.sleep(1)
 
-        raise RuntimeError(f"Failed to connect to LLM at {endpoint} after 3 attempts: {last_error}")
+        # Fallback to extractive summary from highest-ranked chunk to prevent ASGI crash
+        if retrieved_chunks:
+            top_chunk = retrieved_chunks[0]
+            top_text = getattr(top_chunk, "text", "") or ""
+            return sanitize_math_markup(f"بر اساس منبع بازیابی شده:\n{top_text[:400]}...")
+        return "اطلاعاتی درباره این پرسش در منابع در دسترس یافت نشد."

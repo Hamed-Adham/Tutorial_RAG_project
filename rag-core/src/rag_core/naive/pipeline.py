@@ -25,7 +25,7 @@ class NaiveRAGPipeline:
         self,
         embedder: Optional[BgeM3Embedder] = None,
         retriever: Optional[Any] = None,
-        retriever_type: str = "qdrant",
+        retriever_type: str = "auto",
         synthesizer: Optional[NaiveSynthesizer] = None,
         data_dir: Optional[Path] = None,
         cache_dir: Optional[Path] = None
@@ -38,13 +38,34 @@ class NaiveRAGPipeline:
         self.tracker = LangfuseTracker()
         
         self.embedder = embedder or BgeM3Embedder()
+        self._is_indexed = False
         
         if retriever is not None:
             self.retriever = retriever
-        elif self.retriever_type == "qdrant":
-            self.retriever = QdrantRetriever(self.embedder, collection_name=settings.qdrant_collection_name)
+            self._is_indexed = True
+        elif self.retriever_type in ("auto", "qdrant"):
+            try:
+                self.retriever = QdrantRetriever(
+                    self.embedder,
+                    collection_name=getattr(settings, "naive_qdrant_collection_name", "naive_baseline_chunks")
+                )
+                if self.retriever.ensure_collection():
+                    self.retriever_type = "qdrant"
+                    self._is_indexed = True
+                else:
+                    raise RuntimeError("ensure_collection could not initialize or find collection")
+            except Exception as e:
+                print(f"Notice: QdrantRetriever unavailable ({e}). Falling back to in-memory NaiveRetriever cache.")
+                self.retriever = NaiveRetriever(self.embedder, cache_dir=self.cache_dir)
+                if self.retriever.load_cache():
+                    self._is_indexed = True
+                self.retriever_type = "numpy"
         else:
+            # Explicit non-qdrant request - in-memory lock-free cosine similarity
             self.retriever = NaiveRetriever(self.embedder, cache_dir=self.cache_dir)
+            if self.retriever.load_cache():
+                self._is_indexed = True
+            self.retriever_type = "numpy"
             
         self.synthesizer = synthesizer or NaiveSynthesizer(
             base_url=settings.nine_router_base_url,
@@ -53,7 +74,6 @@ class NaiveRAGPipeline:
         )
         self.documents: List[Document] = []
         self.chunks: List[Chunk] = []
-        self._is_indexed = False
 
     def build_index(self, force_reindex: bool = False):
         """Load documents, chunk them, and index into the naive retriever."""
@@ -69,16 +89,26 @@ class NaiveRAGPipeline:
         self,
         question: str,
         top_k: int = 3,
+        source: Optional[str] = None,
+        chapters: Optional[List[int]] = None,
+        categories: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         session_id: Optional[str] = None,
+        turn_pair_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Execute complete query: retrieve chunks, synthesize response, return telemetry."""
+        """Execute complete query: retrieve chunks with optional source/chapter/category filter, synthesize response, return telemetry."""
         if not self._is_indexed:
             self.build_index()
 
         t0 = time.time()
-        retrieved = self.retriever.retrieve(question, top_k=top_k)
+        retrieved = self.retriever.retrieve(
+            question,
+            top_k=top_k,
+            filter_source_type=source,
+            filter_chapters=chapters,
+            filter_categories=categories
+        )
         retrieval_time = time.time() - t0
 
         t1 = time.time()
@@ -92,28 +122,44 @@ class NaiveRAGPipeline:
                 "chunk_id": chunk.chunk_id,
                 "source_type": chunk.source_type,
                 "source_name": chunk.source_name,
-                "score": score
+                "score": score,
+                "metadata": chunk.metadata
             }
             for chunk, score in retrieved
         ]
 
         # Log trace to Langfuse if active
         combined_tags = [f"retriever:{self.retriever_type}"]
+        if source:
+            combined_tags.append(f"source:{source}")
         if tags:
-            combined_tags.extend(tags)
+            for t in tags:
+                if t not in combined_tags:
+                    combined_tags.append(t)
 
-        trace_id = self.tracker.trace_query(
-            name="rag_query",
+        latencies = {
+            "retrieval_ms": round(retrieval_time * 1000, 2),
+            "synthesis_ms": round(generation_time * 1000, 2),
+            "total_ms": round(total_time * 1000, 2),
+        }
+
+        trace_id = self.tracker.trace_naive_pipeline(
+            name="naive_pipeline",
             question=question,
             answer=answer,
-            top_k=top_k,
-            retrieved_count=len(retrieved),
-            sources=sources,
-            retrieval_latency=retrieval_time,
-            generation_latency=generation_time,
             session_id=session_id,
+            turn_pair_id=turn_pair_id,
+            source=source or "science_textbook",
+            top_k=top_k,
+            retriever_type=self.retriever_type,
+            retrieved_chunks=sources,
+            chapters=chapters,
+            categories=categories,
+            retrieval_latency_ms=latencies["retrieval_ms"],
+            synthesis_latency_ms=latencies["synthesis_ms"],
             tags=combined_tags,
             metadata={"retriever_type": self.retriever_type, **(metadata or {})},
+            latencies=latencies,
         )
 
         return {

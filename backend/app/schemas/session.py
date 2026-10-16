@@ -18,11 +18,8 @@ class DialogueTurnModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     citations: List[PageCitation] = Field(default_factory=list)
     latency_profile: Dict[str, float] = Field(default_factory=dict)
+    q_and_a_summary: Optional[str] = Field(default=None, description="Incremental structured summary of this Q&A turn")
     metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    @property
-    def q_and_a_summary(self) -> Optional[str]:
-        return self.metadata.get("q_and_a_summary")
 
 
 

@@ -7,7 +7,7 @@ Tests confidence gating, pronoun resolution, and multi-concept query decompositi
 
 import pytest
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, AsyncMock
 
 from rag_core.indexing.science_schema import (
     RewriteDecision,
@@ -19,6 +19,7 @@ from rag_core.indexing.science_schema import (
 )
 from rag_core.query.query_gate import QueryGate, GatedQueryRewriter
 from rag_core.query.decomposition import SubQueryDecomposer
+from rag_core.query.subq_client import SubQDecisionClient
 from rag_core.evaluation.jev_client import TypeSafeJevClient
 
 
@@ -132,6 +133,24 @@ def test_sub_query_decomposer_compound():
     assert len(subs) >= 2
     assert any("تفاوت سلول" in s or "گیاهی" in s for s in subs)
     assert any("کلروپلاست" in s for s in subs)
+
+
+def test_sub_query_decomposer_guillemets_and_action_verbs():
+    """
+    Verify compound query with guillemets and action verbs decomposes into valid atomic questions,
+    without producing dangling punctuation or quotes.
+    """
+    decomposer = SubQueryDecomposer()
+    query_with_quotes = "«دستگاه گوارش چگونه کار میکند و چه بخشهایی دارد؟»"
+    subs = decomposer.decompose(query_with_quotes)
+
+    assert len(subs) == 2
+    assert "دستگاه گوارش چگونه کار میکند" in subs[0]
+    assert "دستگاه گوارش چه بخشهایی دارد" in subs[1] or "چه بخشهایی دارد" in subs[1]
+    assert "»" not in subs
+    assert "«" not in subs[0]
+    assert all(len(s) > 5 for s in subs)
+
 
 
 @pytest.mark.asyncio
@@ -713,6 +732,79 @@ async def test_scoped_practice_mode_explains_unselected_chapter():
     assert "فصل ۱" in decision.reasoning
     assert "یاخته" in decision.reasoning or "کتاب علوم تجربی هفتم" in decision.reasoning
     assert "بالای صفحه" in decision.reasoning
+
+
+@pytest.mark.asyncio
+async def test_anaphoric_reference_promoted_to_needs_history_and_retrieve():
+    """
+    When user asks an anaphoric follow-up like 'نقش بخش اولی که نام بردی چیست؟' and history exists,
+    even if need_conv_hist_and_retrieve choice was needs_retrieve_only, Jev System One's semantic judgment
+    on has_unresolved_referent (noul >= 0.5) semantically elevates it to needs_history_and_retrieve.
+    """
+    mock_jev = MagicMock(spec=TypeSafeJevClient)
+    mock_jev.is_configured = True
+    mock_jev.system_one.return_value = {
+        "answers": {
+            "curriculum_intent": {"choice": "relevant", "confidence": 0.95},
+            "intends_curriculum_answer": {"noul": 0.95},
+            "need_conv_hist_and_retrieve": {"choice": "needs_retrieve_only", "confidence": 0.90},
+            "has_unresolved_referent": {"noul": 0.88}
+        }
+    }
+
+    mock_subq = MagicMock(spec=SubQDecisionClient)
+    mock_subq.evaluate_history_turns = AsyncMock(return_value={"turn_1": HistoryRelevanceTier.NEEDED_RELEVANT})
+
+    history = [
+        {"role": "user", "content": "دستگاه گوارش چگونه کار میکند؟", "turn_id": "turn_1"},
+        {"role": "assistant", "content": "دستگاه گوارش شامل دهان، معده و روده است.", "turn_id": "turn_1"}
+    ]
+
+    gate = QueryGate(jev_client=mock_jev, subq_client=mock_subq)
+    decision = await gate.evaluate_and_route(
+        query="نقش بخش اولی که نام بردی چیست؟",
+        history=history
+    )
+
+    assert decision.context_need_tier == ContextNeedTier.NEEDS_HISTORY_AND_RETRIEVE
+    assert len(decision.selected_history_items) >= 1
+
+
+@pytest.mark.asyncio
+async def test_conversational_summary_promoted_to_needs_history_only():
+    """
+    When user asks to summarize prior response, Jev System One's semantic judgment
+    on is_conversational_summary_or_rephrase (noul >= 0.6) sets needs_history_only.
+    """
+    mock_jev = MagicMock(spec=TypeSafeJevClient)
+    mock_jev.is_configured = True
+    mock_jev.system_one.return_value = {
+        "answers": {
+            "curriculum_intent": {"choice": "relevant", "confidence": 0.95},
+            "intends_curriculum_answer": {"noul": 0.95},
+            "need_conv_hist_and_retrieve": {"choice": "needs_retrieve_only", "confidence": 0.90},
+            "has_unresolved_referent": {"noul": 0.10},
+            "is_conversational_summary_or_rephrase": {"noul": 0.85}
+        }
+    }
+
+    mock_subq = MagicMock(spec=SubQDecisionClient)
+    mock_subq.evaluate_history_turns = AsyncMock(return_value={"turn_1": HistoryRelevanceTier.NEEDED_RELEVANT})
+
+    history = [
+        {"role": "user", "content": "دستگاه گوارش چگونه کار میکند؟", "turn_id": "turn_1"},
+        {"role": "assistant", "content": "دستگاه گوارش شامل دهان، معده و روده است.", "turn_id": "turn_1"}
+    ]
+
+    gate = QueryGate(jev_client=mock_jev, subq_client=mock_subq)
+    decision = await gate.evaluate_and_route(
+        query="پاسخ قبلی را تیتروار خلاصه کن",
+        history=history
+    )
+
+    assert decision.context_need_tier == ContextNeedTier.NEEDS_HISTORY_ONLY
+
+
 
 
 

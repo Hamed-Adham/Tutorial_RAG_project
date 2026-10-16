@@ -84,9 +84,10 @@ class ScienceBM25Index:
         self,
         query: str,
         top_k: int = 50,
-        chapter_filter: Optional[List[int]] = None
-    ) -> List[Tuple[ScienceChunk, float]]:
-        """Search query against BM25 index returning top_k (chunk, score) tuples with optional chapter pre-filtering."""
+        chapter_filter: Optional[List[int]] = None,
+        category_filter: Optional[List[str]] = None
+    ) -> List[Tuple[Any, float]]:
+        """Search query against BM25 index returning top_k (chunk, score) tuples with optional chapter or category pre-filtering."""
         if self.bm25 is None:
             raise ValueError("BM25 index is not built. Call build() or load() first.")
 
@@ -97,7 +98,15 @@ class ScienceBM25Index:
         scores = self.bm25.get_scores(query_tokens)
         candidate_indices = range(len(scores))
         if chapter_filter:
-            candidate_indices = [i for i in candidate_indices if self.chunks[i].chapter in chapter_filter]
+            candidate_indices = [
+                i for i in candidate_indices 
+                if getattr(self.chunks[i], "chapter", None) in chapter_filter
+            ]
+        if category_filter:
+            candidate_indices = [
+                i for i in candidate_indices 
+                if getattr(self.chunks[i], "category", None) in category_filter
+            ]
 
         top_indices = sorted(candidate_indices, key=lambda i: scores[i], reverse=True)[:top_k]
 

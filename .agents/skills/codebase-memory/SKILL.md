@@ -112,28 +112,27 @@ file before ending your session. It is the living map of the project.
 
 ### Stage 10 — Observability
     observability/langfuse.py, logging.py, trace_evaluators.py
-    ├── build_standardized_benchmarks.py  # Master benchmark generator, corpus aligner & Step 7 validator
-    ├── migrate_datasets_to_langfuse.py   # Cloud dataset migration with virtual subfolder hierarchy
-    ├── langfuse_dataset.py  # Sync to Langfuse Dataset
-    ├── run_eval.py          # Modular eval (--gates-only, --pipeline)
-    ├── run_baseline_eval.py # Full baseline eval runner  [EDIT HERE]
-    ├── baselines/           # Saved JSON reports
-    └── datasets/
-        ├── golden_set.jsonl # 110-item benchmark (81 dev / 29 test across 4 suites)
-        ├── suites/          # Master CSV suites (input, expected_output, metadata)
-        ├── dev/ & test/     # Partitioned CSV splits
-        └── langfuse/        # Mirror for cloud dataset virtual namespaces
+    Canonical Trace Standards:
+    - Root Trace Names:
+      - 'advanced_pipeline': Core enterprise orchestrator (5 stages: query_gate, query_transformation, conversational_memory, retrieval_chain, response_synthesis). Tags: ['pipeline:advanced', 'source:...', 'mode:sync'|'mode:stream']
+      - 'naive_pipeline': Baseline ground zero (2 stages: retrieval as RETRIEVER, response_synthesis as GENERATION). Tags: ['pipeline:naive', 'source:...', 'mode:sync'|'mode:stream']
+      - Strictly avoid mixed names (webui_chat, webui_stream_chat, rag_query, advanced_science_rag).
 
 ### Naive Baseline (simplified baseline components)
     naive/
-    ├── document_loader.py, chunker.py, embedder.py
-    ├── retriever.py, qdrant_retriever.py, synthesizer.py
-    ├── pipeline.py           # NaiveRAGPipeline (e2e baseline)
+    ├── document_loader.py    # Multi-source loader (PDF + FAQ CSV) with exact book_page and citation format
+    ├── build_naive_database.py # Precomputes BGE-M3 vectors (question-only for FAQ), persists naive_index.npz & naive_metadata.json
+    ├── chunker.py, embedder.py
+    ├── retriever.py          # In-memory NumPy cosine similarity fallback with filter_source_type on naive_index.npz
+    ├── qdrant_retriever.py   # Primary Qdrant retriever on isolated collection ('naive_baseline_chunks') with ensure_collection() auto-sync
+    ├── synthesizer.py        # Direct single-shot baseline prompt with OpenAI client, math sanitization, and graceful fallback
+    ├── pipeline.py           # NaiveRAGPipeline (prioritizes QdrantRetriever, falls back to in-memory NumPy; traces to 'naive_pipeline')
     ├── judge_evaluator.py    # LEGACY COPY — canonical at evaluation/
     └── run_baseline_eval.py  # LEGACY COPY — canonical at evaluation/
 
-    WARNING: Only edit the evaluation/ versions.
-    naive/ copies kept only for regression comparison.
+    WARNING: Naive indexes ('naive_baseline_chunks' / naive_index.npz) are strictly isolated
+    from advanced collections ('science_textbook_dense' / 'faq_admin_dense'). Citation standard
+    uses 'فصل {chapter_num} - {chapter_title} – صفحه {book_page}' with pure relative page in URL.
 
 ### Stage 10 — Observability
     observability/langfuse.py, logging.py

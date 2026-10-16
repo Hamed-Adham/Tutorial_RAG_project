@@ -17,7 +17,9 @@ import {
   ExternalLink,
   DollarSign,
   Reply,
-  MessageSquare
+  MessageSquare,
+  Database,
+  HelpCircle
 } from "lucide-react"
 
 interface ChatMessageProps {
@@ -83,14 +85,70 @@ export const CHAPTER_TO_FILENAME: Record<number, string> = {
   15: "C706_olom_haftom-7-144-132-137.pdf",
 }
 
+export function extractStartPageFromFilename(filename: string): number {
+  const m = filename.match(/-(\d+)-(\d+)\.pdf$/)
+  if (m) {
+    return parseInt(m[1], 10)
+  }
+  return 1
+}
+
+export function toEnglishDigits(str: string): string {
+  return str
+    .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d).toString())
+    .replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d).toString())
+}
+
 export function formatChapterCitationLabel(filename: string, pages?: string | number): string {
-  const clean = filename.trim().split("#")[0].replace(/^\//, "")
-  const info = FILENAME_TO_CHAPTER[clean]
-  if (info) {
-    if (pages) {
-      return `فصل ${info.ch}، صفحه ${pages}`
+  const normalized = toEnglishDigits(filename)
+  // Extract C706 filename if present
+  const pdfMatch = normalized.match(/(C706_olom_haftom[^\s#?)]+\.pdf)/)
+  let clean = pdfMatch ? pdfMatch[1] : normalized.trim().split("#")[0].replace(/^\/?(?:api\/v1\/pdf\/)?/, "")
+
+  // If clean doesn't match directly in map, try matching chapter number e.g. فصل 10
+  let info = FILENAME_TO_CHAPTER[clean]
+  if (!info) {
+    const chMatch = normalized.match(/فصل\s*(\d+)/)
+    if (chMatch) {
+      const chNum = parseInt(chMatch[1], 10)
+      const mappedFile = CHAPTER_TO_FILENAME[chNum]
+      if (mappedFile) {
+        clean = mappedFile
+        info = FILENAME_TO_CHAPTER[clean]
+      }
     }
-    return `فصل ${info.ch} (${info.name})`
+  }
+
+  if (info) {
+    const startPage = extractStartPageFromFilename(clean)
+    let pVal = pages !== undefined && pages !== null ? toEnglishDigits(String(pages)) : undefined
+    if (pVal === undefined || pVal.trim() === "") {
+      const pageMatch = normalized.match(/[#&?]page=(\d+)/) || normalized.match(/(?:صفحات?|صفحه)\s*([0-9،,\s]+)/)
+      if (pageMatch) {
+        pVal = pageMatch[1].replace(/،/g, ",")
+      }
+    }
+    if (pVal !== undefined && pVal.trim() !== "") {
+      const pStr = pVal.trim()
+      // If comma-separated pages
+      if (pStr.includes(",")) {
+        const converted = pStr
+          .split(",")
+          .map((p) => {
+            const num = parseInt(p.trim(), 10)
+            if (!isNaN(num) && num < startPage) {
+              return startPage + num - 1
+            }
+            return p.trim()
+          })
+          .join("، ")
+        return `فصل ${info.ch} - ${info.name} – صفحات ${converted}`
+      }
+      const num = parseInt(pStr, 10)
+      const bookPage = !isNaN(num) && num < startPage ? startPage + num - 1 : pStr
+      return `فصل ${info.ch} - ${info.name} – صفحه ${bookPage}`
+    }
+    return `فصل ${info.ch} - ${info.name}`
   }
   return pages ? `صفحه ${pages}` : "کتاب درسی"
 }
@@ -255,11 +313,29 @@ function formatPersianScientificMarkdown(raw: string): string {
     return fullMatch
   })
 
-  // 1. Clean messy raw filename mentions in plain text, but NEVER touch URLs inside (...)
-  text = text.replace(/(\[[^\]]*\]\([^)]+\))|(C706_olom_haftom[^\s#?)]+\.pdf)(?:\s*[-–—]\s*(?:pages?|صفحات?|صفحه)?\s*([0-9,\s]+))?/gi, (match, link, file, pages) => {
-    if (link) return link // Preserve markdown links completely untouched!
-    return formatChapterCitationLabel(file, pages ? pages.trim() : "")
-  })
+  // 1. Clean messy raw URLs or filenames in plain text, converting them into clean clickable markdown links
+  // First convert raw /api/v1/pdf/C706... into markdown links: [Label](URL)
+  text = text.replace(
+    /(?:^|[^\(])((?:https?:\/\/[^\s\/]+)?\/?api\/v1\/pdf\/(C706_olom_haftom[^\s#?)]+\.pdf)(?:[#&?]page=(\d+))?)/gi,
+    (match, fullUrl, file, page) => {
+      const p = page || "1"
+      const label = formatChapterCitationLabel(file, p)
+      const cleanUrl = resolvePdfUrl(`/api/v1/pdf/${file}#page=${p}`, label)
+      return ` [${label}](${cleanUrl})`
+    }
+  )
+
+  // Then convert standalone C706_olom_haftom... mentions in plain text
+  text = text.replace(
+    /(\[[^\]]*\]\([^)]+\))|(C706_olom_haftom[^\s#?)]+\.pdf)(?:\s*[-–—]\s*(?:pages?|صفحات?|صفحه)?\s*([0-9,\s]+))?/gi,
+    (match, link, file, pages) => {
+      if (link) return link // Preserve markdown links completely untouched!
+      const p = pages ? pages.trim() : "1"
+      const label = formatChapterCitationLabel(file, p)
+      const cleanUrl = resolvePdfUrl(`/api/v1/pdf/${file}#page=${p}`, label)
+      return `[${label}](${cleanUrl})`
+    }
+  )
 
   // 2. Convert bullet headers like "• (صفحه 6): ### فعالیت ..." or "• (صفحه 6): ..." into clean headings
   text = text.replace(/•\s*\(صفحه\s*(\d+)\)\s*:\s*###\s*(.*)/g, "\n\n### 📄 صفحه $1: $2\n")
@@ -317,22 +393,27 @@ function formatPersianScientificMarkdown(raw: string): string {
 
   // 6. Deduplicate & format Sources block at bottom with clean divider & clickable PDF links
   // If the text contains one or more source sections, isolate the main answer body and consolidate all unique citations
-  const sourcesHeaderRegex = /(?:\n\s*---\s*)?\n+\s*(?:\*{0,2}:?Sources:?\*{0,2}|####?\s*📚\s*منابع استنادی کتاب درسی:?)/i
+  const sourcesHeaderRegex = /(?:\n\s*---\s*)?\n+\s*(?:\*{0,2}:?Sources:?\*{0,2}|####?\s*📚\s*منابع استنادی(?: کتاب درسی| پرسش‌های متداول \(FAQ\)| ترکیبی \(کتاب علوم و پرسش‌های متداول\))?:?)/i
   if (sourcesHeaderRegex.test(text)) {
     const parts = text.split(sourcesHeaderRegex)
     const answerBody = parts[0].trim()
     const rawSources = parts.slice(1).join("\n")
 
-    const citationRegex = /\[(\d+)\]\s*(?:\[([^\]]+)\]\(([^)]+)\)|\[?([^\s\]()]+\.pdf)\]?(?:\s*[-–—]\s*(?:pages?|صفحات?|صفحه)?\s*([0-9,\s]+))?)/g
-    const uniqueCitations = new Map<string, { label: string; url: string }>()
+    const citationRegex = /\[(\d+)\]\s*(?:\[([^\]]+)\]\(([^)]+)\)|\[?([^\s\]()]+\.pdf)\]?(?:\s*[-–—]\s*(?:pages?|صفحات?|صفحه)?\s*([0-9,\s]+))?|([^\n]+))/g
+    const uniqueCitations = new Map<string, { label: string; url?: string }>()
 
     let m: RegExpExecArray | null
     while ((m = citationRegex.exec(rawSources)) !== null) {
-      const [_, __, linkText, linkUrl, rawFile, rawPages] = m
+      const [_, __, linkText, linkUrl, rawFile, rawPages, plainText] = m
       if (linkText && linkUrl) {
         const targetUrl = resolvePdfUrl(linkUrl, linkText)
+        let cleanLabel = linkText.trim()
+        if (cleanLabel.includes("C706") || cleanLabel.includes("/api/v1/pdf/") || cleanLabel.endsWith(".pdf") || cleanLabel.includes("فصل")) {
+          const pageMatch = targetUrl.match(/page=(\d+)/)
+          cleanLabel = formatChapterCitationLabel(cleanLabel, pageMatch ? pageMatch[1] : "")
+        }
         if (!uniqueCitations.has(targetUrl)) {
-          uniqueCitations.set(targetUrl, { label: linkText, url: targetUrl })
+          uniqueCitations.set(targetUrl, { label: cleanLabel, url: targetUrl })
         }
       } else if (rawFile) {
         const firstPage = rawPages ? rawPages.split(",")[0].trim() : "1"
@@ -341,17 +422,45 @@ function formatPersianScientificMarkdown(raw: string): string {
         if (!uniqueCitations.has(targetUrl)) {
           uniqueCitations.set(targetUrl, { label, url: targetUrl })
         }
+      } else if (plainText && plainText.trim()) {
+        const cleanPlain = plainText.trim()
+        const pdfMatch = cleanPlain.match(/(?:(?:\/?api\/v1\/pdf\/)|(?:https?:\/\/[^\s\/]+\/api\/v1\/pdf\/))?(C706_olom_haftom[^\s#?)]+\.pdf)(?:[#&?]page=(\d+))?/)
+        if (pdfMatch) {
+          const file = pdfMatch[1]
+          const page = pdfMatch[2] || "1"
+          const label = formatChapterCitationLabel(file, page)
+          const targetUrl = resolvePdfUrl(`/api/v1/pdf/${file}#page=${page}`, label)
+          if (!uniqueCitations.has(targetUrl)) {
+            uniqueCitations.set(targetUrl, { label, url: targetUrl })
+          }
+        } else if (!uniqueCitations.has(cleanPlain)) {
+          uniqueCitations.set(cleanPlain, { label: cleanPlain })
+        }
       }
     }
 
     if (uniqueCitations.size > 0) {
       let counter = 1
       const lines: string[] = []
+      let hasFaq = false
+      let hasScience = false
       Array.from(uniqueCitations.values()).forEach((cit) => {
-        lines.push(`- **[${counter}] [${cit.label}](${cit.url})**`)
+        if (cit.url) {
+          hasScience = true
+          lines.push(`- **[${counter}] [${cit.label}](${cit.url})**`)
+        } else {
+          hasFaq = true
+          lines.push(`- **[${counter}] ${cit.label}**`)
+        }
         counter++
       })
-      text = `${answerBody}\n\n---\n\n#### 📚 منابع استنادی کتاب درسی:\n${lines.join("\n")}`
+      const sectionTitle =
+        hasFaq && hasScience
+          ? "منابع استنادی ترکیبی (کتاب علوم و پرسش‌های متداول):"
+          : hasFaq
+          ? "منابع استنادی پرسش‌های متداول (FAQ):"
+          : "منابع استنادی کتاب درسی:"
+      text = `${answerBody}\n\n---\n\n#### 📚 ${sectionTitle}\n${lines.join("\n")}`
     } else {
       text = answerBody
     }
@@ -453,11 +562,63 @@ export function ChatMessage({ message, isStreaming, streamingStatus, onSelectAsC
             </div>
           </div>
 
-          {/* Conversational Context Badge (User Story 2 & 6) */}
-          {!isUser && message.conversational_context_badge && (
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/10 border border-sky-500/20 text-sky-400 text-xs font-medium">
-              <MessageSquare className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <span>{message.conversational_context_badge}</span>
+          {/* Conversational Context & Citation Domain Chips */}
+          {!isUser && (
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              {message.conversational_context_badge && (
+                <div
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium shadow-xs ${
+                    message.conversational_context_badge.includes("پایه") || message.conversational_context_badge.includes("Naive")
+                      ? "bg-amber-500/15 border border-amber-500/30 text-amber-700 dark:text-amber-300"
+                      : "bg-sky-500/10 border border-sky-500/20 text-sky-600 dark:text-sky-400"
+                  }`}
+                >
+                  {message.conversational_context_badge.includes("پایه") || message.conversational_context_badge.includes("Naive") ? (
+                    <Database className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                  ) : (
+                    <MessageSquare className="w-3.5 h-3.5 text-sky-500 dark:text-sky-400 shrink-0" />
+                  )}
+                  <span>{message.conversational_context_badge}</span>
+                </div>
+              )}
+
+              {/* Structured Domain Badges & Citations Chips */}
+              {message.citations && message.citations.length > 0 && !message.is_refusal && (
+                Array.from(
+                  new Set(
+                    message.citations.map((c) => {
+                      const isFaq = c.doc_id === "administrative_faq" || c.filename?.includes("faq") || !c.filename?.endsWith(".pdf")
+                      if (isFaq) {
+                        const cat = c.category || c.metadata?.category || "پرسش‌های متداول"
+                        const rowStr = c.row ? ` (ردیف ${c.row})` : ""
+                        return JSON.stringify({ type: "faq", label: `FAQ: ${cat}${rowStr}` })
+                      } else {
+                        const info = FILENAME_TO_CHAPTER[c.filename]
+                        const chLabel = info ? `فصل ${info.ch}: ${info.name}` : `کتاب علوم (ص ${c.book_page || c.page})`
+                        return JSON.stringify({ type: "science", label: chLabel })
+                      }
+                    })
+                  )
+                )
+                  .map((str) => JSON.parse(str) as { type: "faq" | "science"; label: string })
+                  .map((badge, idx) => (
+                    <span
+                      key={idx}
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border shadow-xs ${
+                        badge.type === "faq"
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25"
+                          : "bg-primary/10 text-primary border-primary/20"
+                      }`}
+                    >
+                      {badge.type === "faq" ? (
+                        <HelpCircle className="w-2.5 h-2.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      ) : (
+                        <BookOpen className="w-2.5 h-2.5 text-primary shrink-0" />
+                      )}
+                      <span>{badge.label}</span>
+                    </span>
+                  ))
+              )}
             </div>
           )}
 
@@ -565,7 +726,10 @@ export function ChatMessage({ message, isStreaming, streamingStatus, onSelectAsC
                   const finalHref = resolvePdfUrl(href || "#", labelStr)
                   let linkText = children
 
-                  if (typeof children === "string" && (children.includes("C706") || children.endsWith(".pdf"))) {
+                  if (
+                    typeof children === "string" &&
+                    (children.includes("C706") || children.includes(".pdf") || children.includes("/api/v1/pdf/") || children.includes("فصل"))
+                  ) {
                     const pageMatch = finalHref.match(/page=(\d+)/)
                     linkText = formatChapterCitationLabel(children, pageMatch ? pageMatch[1] : "")
                   }

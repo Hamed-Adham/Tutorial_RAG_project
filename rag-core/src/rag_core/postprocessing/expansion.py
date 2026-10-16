@@ -134,6 +134,35 @@ class ParentSectionExpander:
         for item in candidates:
             cand = item.candidate if hasattr(item, "candidate") else item
             source_chunk_ids.append(cand.chunk_id)
+
+            # Pass-through mode for administrative FAQ chunks
+            is_faq = (
+                getattr(cand, "doc_id", "") == "administrative_faq"
+                or getattr(cand, "source_type", "") == "administrative_faq"
+            )
+            if is_faq:
+                faq_key = f"faq_{cand.chunk_id}"
+                if faq_key in seen_sections:
+                    continue
+                seen_sections.add(faq_key)
+                words = cand.text.split()
+                parent = ParentSection(
+                    section_id=getattr(cand, "section_id", f"faq_{cand.chunk_id}"),
+                    chapter=0,
+                    title=f"پرسش‌های متداول: {getattr(cand, 'category', 'عمومی')}",
+                    page_start=getattr(cand, "page", 1),
+                    page_end=getattr(cand, "page", 1),
+                    full_text=cand.text,
+                    token_count=len(words)
+                )
+                if len(selected_parents) >= max_p:
+                    break
+                if accumulated_tokens + parent.token_count > max_t and selected_parents:
+                    break
+                selected_parents.append(parent)
+                accumulated_tokens += parent.token_count
+                continue
+
             sec_id = cand.section_id
 
             # Use composite section key to ensure uniqueness per chapter

@@ -31,15 +31,28 @@ class RAGService:
         self,
         pipeline: Optional[AdvancedRAGPipeline] = None,
         enterprise_graph: Optional[Any] = None,
+        naive_pipeline: Optional[Any] = None,
         session_store: Optional[ISessionStore] = None,
         gateway_instance: Optional[ConcurrencyGateway] = None,
         tracker: Optional[OperationalMetricsTracker] = None,
     ):
         self._pipeline = pipeline
         self._enterprise_graph = enterprise_graph
+        self._naive_pipeline = naive_pipeline
         self.session_store = session_store or get_session_store()
         self.gateway = gateway_instance or gateway
         self.tracker = tracker or metrics_tracker
+
+    @property
+    def naive_pipeline(self) -> Any:
+        if self._naive_pipeline is None:
+            from rag_core.naive.pipeline import NaiveRAGPipeline
+            self._naive_pipeline = NaiveRAGPipeline(retriever_type="auto")
+        return self._naive_pipeline
+
+    @naive_pipeline.setter
+    def naive_pipeline(self, val: Any):
+        self._naive_pipeline = val
 
     @property
     def pipeline(self) -> AdvancedRAGPipeline:
@@ -72,24 +85,110 @@ class RAGService:
         # 1. Acquire concurrency slot with queue delay tracking
         async with self.gateway.acquire_slot() as queue_wait_ms:
             # 2. Retrieve prior dialogue turns for history resolution (client-sent or store)
-            history_turns: List[Dict[str, str]] = []
-            if request.history:
-                for t in request.history[-4:]:
-                    history_turns.append({"role": t.get("role", "user"), "content": t.get("content", "")})
-            else:
-                session_state = await self.session_store.get_session(session_id)
-                if session_state and session_state.turns:
-                    for t in session_state.turns[-4:]:
-                        history_turns.append({"role": t.role, "content": t.content})
+            history_turns: List[Dict[str, Any]] = []
+            session_state = await self.session_store.get_session(session_id)
+            turn_summary_map: Dict[str, str] = {}
+            if session_state and session_state.turns:
+                for st in session_state.turns:
+                    sum_val = st.q_and_a_summary or (st.metadata.get("q_and_a_summary") if hasattr(st, "metadata") else None)
+                    if sum_val:
+                        if st.turn_pair_id:
+                            turn_summary_map[st.turn_pair_id] = sum_val
+                        turn_summary_map[st.turn_id] = sum_val
 
-            # 3. Execute Core Advanced Enterprise Science Pipeline or LangGraph Orchestrator
+            if request.history:
+                for idx, t in enumerate(request.history[-4:]):
+                    tid = t.get("turn_id")
+                    s_val = t.get("summary") or t.get("q_and_a_summary")
+                    if not s_val and tid and tid in turn_summary_map:
+                        s_val = turn_summary_map[tid]
+                    history_turns.append({
+                        "role": t.get("role", "user"),
+                        "content": t.get("content", ""),
+                        "turn_id": tid or f"turn_{idx}",
+                        "summary": s_val,
+                        "q_and_a_summary": s_val,
+                    })
+            elif session_state and session_state.turns:
+                for t in session_state.turns[-4:]:
+                    sum_val = t.q_and_a_summary or (t.metadata.get("q_and_a_summary") if hasattr(t, "metadata") else None)
+                    history_turns.append({
+                        "role": t.role,
+                        "content": t.content,
+                        "turn_id": t.turn_pair_id or t.turn_id,
+                        "summary": sum_val,
+                        "q_and_a_summary": sum_val,
+                    })
+
+            # 3. Execute Naive Baseline OR Core Advanced Enterprise Science Pipeline
             t_exec_start = time.perf_counter()
-            if settings.use_langgraph_engine:
+            if request.pipeline_mode == "naive":
+                filter_source = request.source or "science_textbook"
+                filter_chapters = request.selected_chapters if filter_source == "science_textbook" else None
+                filter_categories = request.selected_categories if filter_source == "administrative_faq" else None
+
+                naive_res = self.naive_pipeline.query(
+                    question=request.query,
+                    top_k=request.top_k,
+                    source=filter_source,
+                    chapters=filter_chapters,
+                    categories=filter_categories,
+                    session_id=session_id,
+                    tags=["webui", "sync", "mode:sync"]
+                )
+                exec_elapsed_ms = (time.perf_counter() - t_exec_start) * 1000.0
+
+                citations = []
+                for s in naive_res.get("sources", []):
+                    meta = s.get("metadata", {}) or {}
+                    page = meta.get("page", 1)
+                    book_p = meta.get("book_page", page)
+                    cit_str = meta.get("citation", "")
+                    citations.append(PageCitation(
+                        doc_id=s.get("chunk_id", ""),
+                        filename=s.get("source_name", ""),
+                        page=page,
+                        score=s.get("score", 0.0),
+                        chunk_id=s.get("chunk_id", ""),
+                        book_page=book_p,
+                        citation=cit_str
+                    ))
+
+                latencies = {
+                    "queue_wait_ms": queue_wait_ms,
+                    "retrieval_ms": round(naive_res.get("retrieval_latency", 0.0) * 1000, 2),
+                    "synthesis_ms": round(naive_res.get("generation_latency", 0.0) * 1000, 2),
+                    "total_ms": round(queue_wait_ms + exec_elapsed_ms, 2)
+                }
+                total_elapsed_ms = latencies["total_ms"]
+                raw_ans = naive_res.get("answer", "")
+                from rag_core.postprocessing.citations import CitationFormatter
+                bundle = CitationFormatter().format(citations)
+                if bundle.inline_text:
+                    answer = f"{raw_ans}\n\n**Sources:**\n{bundle.inline_text}"
+                else:
+                    answer = raw_ans
+
+                effective_query = request.query
+                is_refusal = False
+                trace_id = naive_res.get("trace_id", "")
+                badge = "پایپ‌لاین پایه (Naive Baseline)"
+                intent_tier = "curriculum" if filter_source == "science_textbook" else "administrative_faq"
+                context_need_tier = "needs_retrieve_only"
+                q_and_a_summary = raw_ans[:200]
+            elif settings.use_langgraph_engine:
+                req_sources = request.selected_sources
+                if not req_sources and request.source:
+                    req_sources = [request.source]
+                req_faq_cats = request.selected_faq_categories or request.selected_categories
+
                 graph_state = await self.enterprise_graph.ainvoke(
                     query=request.query,
                     session_id=session_id,
                     history=history_turns if history_turns else None,
                     selected_chapters=request.selected_chapters,
+                    selected_sources=req_sources,
+                    selected_faq_categories=req_faq_cats,
                     config={
                         "selected_context_turn_id": request.selected_context_turn_id,
                         "history_enabled": request.history_enabled
@@ -106,7 +205,9 @@ class RAGService:
                             filename=c.get("filename", "کتاب علوم تجربی هفتم"),
                             page=c.get("page", 1),
                             score=c.get("score", 0.0),
-                            chunk_id=c.get("chunk_id", "")
+                            chunk_id=c.get("chunk_id", ""),
+                            book_page=c.get("book_page"),
+                            citation=c.get("citation")
                         ))
                     elif hasattr(c, "page"):
                         citations.append(c)
@@ -184,81 +285,93 @@ class RAGService:
             )
 
             # 7. Record Langfuse trace & flush immediately to Cloud
-            active_engine = self.enterprise_graph if settings.use_langgraph_engine else self.pipeline
-            if active_engine.tracker and active_engine.tracker.is_active:
-                try:
-                    gate_dec = (
-                        graph_state.get("query_gate_decision")
-                        if settings.use_langgraph_engine
-                        else getattr(result, "rewrite_decision", None)
-                    )
-                    dense_cands = (
-                        graph_state.get("dense_candidates", [])
-                        if settings.use_langgraph_engine
-                        else getattr(result, "dense_results", [])
-                    )
-                    bm25_cands = (
-                        graph_state.get("bm25_candidates", [])
-                        if settings.use_langgraph_engine
-                        else getattr(result, "bm25_results", [])
-                    )
-                    fused_cands = (
-                        graph_state.get("fused_candidates", [])
-                        if settings.use_langgraph_engine
-                        else getattr(result, "retrieved_chunks", [])
-                    )
-                    reranked_cands = (
-                        graph_state.get("reranked_chunks", [])
-                        if settings.use_langgraph_engine
-                        else getattr(result, "reranked_candidates", [])
-                    )
-                    expanded_ctx = (
-                        graph_state.get("expanded_sections", [])
-                        if settings.use_langgraph_engine
-                        else getattr(result, "expanded_context", None)
-                    )
+            if request.pipeline_mode == "naive":
+                if self.naive_pipeline.tracker and self.naive_pipeline.tracker.is_active:
+                    self.naive_pipeline.tracker.flush()
+            else:
+                active_engine = self.enterprise_graph if settings.use_langgraph_engine else self.pipeline
+                if active_engine.tracker and active_engine.tracker.is_active:
+                    try:
+                        gate_dec = (
+                            graph_state.get("query_gate_decision")
+                            if settings.use_langgraph_engine
+                            else getattr(result, "rewrite_decision", None)
+                        )
+                        dense_cands = (
+                            graph_state.get("dense_candidates", [])
+                            if settings.use_langgraph_engine
+                            else getattr(result, "dense_results", [])
+                        )
+                        bm25_cands = (
+                            graph_state.get("bm25_candidates", [])
+                            if settings.use_langgraph_engine
+                            else getattr(result, "bm25_results", [])
+                        )
+                        fused_cands = (
+                            graph_state.get("fused_candidates", [])
+                            if settings.use_langgraph_engine
+                            else getattr(result, "retrieved_chunks", [])
+                        )
+                        reranked_cands = (
+                            graph_state.get("reranked_chunks", [])
+                            if settings.use_langgraph_engine
+                            else getattr(result, "reranked_candidates", [])
+                        )
+                        expanded_ctx = (
+                            graph_state.get("expanded_sections", [])
+                            if settings.use_langgraph_engine
+                            else getattr(result, "expanded_context", None)
+                        )
 
-                    trace_res = active_engine.tracker.trace_advanced_pipeline(
-                        name="webui_chat",
-                        question=request.query,
-                        answer=answer,
-                        is_refusal=is_refusal,
-                        session_id=session_id,
-                        turn_pair_id=turn_id,
-                        tags=["webui", "chat", "pipeline:advanced"],
-                        metadata={
-                            "effective_query": effective_query,
-                            "turn_pair_id": turn_id,
-                            "cost_1k_min_usd": cost_1k["min_1k_usd"],
-                            "cost_1k_max_usd": cost_1k["max_1k_usd"],
-                            "is_refusal": is_refusal,
-                            "intent_tier": intent_tier,
-                            "context_need_tier": context_need_tier,
-                            "conversational_context_badge": badge,
-                        },
-                        rewrite_decision=gate_dec,
-                        history=history_turns,
-                        effective_query=effective_query,
-                        gate_latency_ms=latencies.get("gate1_ms", latencies.get("rewrite_ms", 0.0)),
-                        rewrite_latency_ms=latencies.get("distill_ms", 0.0),
-                        subq_latency_ms=latencies.get("subq_model2_ms", 0.0),
-                        dense_results=dense_cands,
-                        bm25_results=bm25_cands,
-                        fused_candidates=fused_cands,
-                        retrieval_latency_ms=latencies.get("retrieval_ms", 0.0),
-                        input_candidates=fused_cands[:8] if fused_cands else [],
-                        reranked_candidates=reranked_cands,
-                        rerank_latency_ms=latencies.get("rerank_ms", 0.0),
-                        expanded_context=expanded_ctx,
-                        expansion_latency_ms=latencies.get("expansion_ms", 0.0),
-                        synthesis_latency_ms=latencies.get("synthesis_ms", 0.0),
-                        latencies=latencies,
-                    )
-                    if not trace_id or trace_id == "offline_trace":
-                        trace_id = "mock_trace_id" if "Mock" in type(trace_res).__name__ else str(trace_res or "offline_trace")
-                    active_engine.tracker.flush()
-                except Exception as te:
-                    logger.warning(f"Error logging Langfuse trace: {te}")
+                        recorded_full_prompt = (
+                            active_engine.get_full_prompt_for_session(session_id)
+                            if hasattr(active_engine, "get_full_prompt_for_session")
+                            else getattr(active_engine, "last_full_prompt", "")
+                        )
+
+                        trace_res = active_engine.tracker.trace_advanced_pipeline(
+                            name="advanced_pipeline",
+                            question=request.query,
+                            answer=answer,
+                            is_refusal=is_refusal,
+                            session_id=session_id,
+                            turn_pair_id=turn_id,
+                            full_prompt=recorded_full_prompt or "",
+                            raw_completion=answer,
+                            tags=["pipeline:advanced", f"source:{request.source or 'science_textbook'}", "mode:sync", "webui"],
+                            metadata={
+                                "effective_query": effective_query,
+                                "turn_pair_id": turn_id,
+                                "cost_1k_min_usd": cost_1k["min_1k_usd"],
+                                "cost_1k_max_usd": cost_1k["max_1k_usd"],
+                                "is_refusal": is_refusal,
+                                "intent_tier": intent_tier,
+                                "context_need_tier": context_need_tier,
+                                "conversational_context_badge": badge,
+                            },
+                            rewrite_decision=gate_dec,
+                            history=history_turns,
+                            effective_query=effective_query,
+                            gate_latency_ms=latencies.get("gate1_ms", latencies.get("rewrite_ms", 0.0)),
+                            rewrite_latency_ms=latencies.get("distill_ms", 0.0),
+                            subq_latency_ms=latencies.get("subq_model2_ms", 0.0),
+                            dense_results=dense_cands,
+                            bm25_results=bm25_cands,
+                            fused_candidates=fused_cands,
+                            retrieval_latency_ms=latencies.get("retrieval_ms", 0.0),
+                            input_candidates=fused_cands[:8] if fused_cands else [],
+                            reranked_candidates=reranked_cands,
+                            rerank_latency_ms=latencies.get("rerank_ms", 0.0),
+                            expanded_context=expanded_ctx,
+                            expansion_latency_ms=latencies.get("expansion_ms", 0.0),
+                            synthesis_latency_ms=latencies.get("synthesis_ms", 0.0),
+                            latencies=latencies,
+                        )
+                        if not trace_id or trace_id == "offline_trace":
+                            trace_id = "mock_trace_id" if "Mock" in type(trace_res).__name__ else str(trace_res or "offline_trace")
+                        active_engine.tracker.flush()
+                    except Exception as te:
+                        logger.warning(f"Error logging Langfuse trace: {te}")
 
             return ChatResponse(
                 session_id=session_id,
@@ -275,6 +388,7 @@ class RAGService:
                 latency_profile=latencies,
                 trace_id=trace_id,
                 cost_1k=cost_1k,
+                q_and_a_summary=q_and_a_summary,
             )
 
     async def execute_chat_stream(self, request: ChatRequest) -> AsyncIterator[str]:
@@ -288,15 +402,163 @@ class RAGService:
             # Emit immediate concurrency queue acquisition status
             yield f'event: status\ndata: {json.dumps({"step": "queue", "title": "تخصیص صف پردازش"}, ensure_ascii=False)}\n\n'
 
-            history_turns: List[Dict[str, str]] = []
+            history_turns: List[Dict[str, Any]] = []
+            session_state = await self.session_store.get_session(session_id)
+            turn_summary_map: Dict[str, str] = {}
+            if session_state and session_state.turns:
+                for st in session_state.turns:
+                    sum_val = st.q_and_a_summary or (st.metadata.get("q_and_a_summary") if hasattr(st, "metadata") else None)
+                    if sum_val:
+                        if st.turn_pair_id:
+                            turn_summary_map[st.turn_pair_id] = sum_val
+                        turn_summary_map[st.turn_id] = sum_val
+
             if request.history:
-                for t in request.history[-4:]:
-                    history_turns.append({"role": t.get("role", "user"), "content": t.get("content", "")})
-            else:
-                session_state = await self.session_store.get_session(session_id)
-                if session_state and session_state.turns:
-                    for t in session_state.turns[-4:]:
-                        history_turns.append({"role": t.role, "content": t.content})
+                for idx, t in enumerate(request.history[-4:]):
+                    tid = t.get("turn_id")
+                    s_val = t.get("summary") or t.get("q_and_a_summary")
+                    if not s_val and tid and tid in turn_summary_map:
+                        s_val = turn_summary_map[tid]
+                    history_turns.append({
+                        "role": t.get("role", "user"),
+                        "content": t.get("content", ""),
+                        "turn_id": tid or f"turn_{idx}",
+                        "summary": s_val,
+                        "q_and_a_summary": s_val,
+                    })
+            elif session_state and session_state.turns:
+                for t in session_state.turns[-4:]:
+                    sum_val = t.q_and_a_summary or (t.metadata.get("q_and_a_summary") if hasattr(t, "metadata") else None)
+                    history_turns.append({
+                        "role": t.role,
+                        "content": t.content,
+                        "turn_id": t.turn_pair_id or t.turn_id,
+                        "summary": sum_val,
+                        "q_and_a_summary": sum_val,
+                    })
+
+            if request.pipeline_mode == "naive":
+                filter_source = request.source or "science_textbook"
+                filter_chapters = request.selected_chapters if filter_source == "science_textbook" else None
+                filter_categories = request.selected_categories if filter_source == "administrative_faq" else None
+
+                yield f'event: status\ndata: {json.dumps({"step": "retrieval", "title": "بازیابی ساده تک‌مرحله‌ای (Naive Baseline)"}, ensure_ascii=False)}\n\n'
+
+                t_exec_start = time.perf_counter()
+                naive_res = self.naive_pipeline.query(
+                    question=request.query,
+                    top_k=request.top_k,
+                    source=filter_source,
+                    chapters=filter_chapters,
+                    categories=filter_categories,
+                    session_id=session_id,
+                    tags=["webui", "stream", "mode:stream"]
+                )
+                yield f'event: status\ndata: {json.dumps({"step": "synthesis", "title": "تولید پاسخ مدل زبانی پایه"}, ensure_ascii=False)}\n\n'
+
+                citations = []
+                for s in naive_res.get("sources", []):
+                    meta = s.get("metadata", {}) or {}
+                    page = meta.get("page", 1)
+                    book_p = meta.get("book_page", page)
+                    cit_str = meta.get("citation", "")
+                    citations.append(PageCitation(
+                        doc_id=s.get("chunk_id", ""),
+                        filename=s.get("source_name", ""),
+                        page=page,
+                        score=s.get("score", 0.0),
+                        chunk_id=s.get("chunk_id", ""),
+                        book_page=book_p,
+                        citation=cit_str
+                    ))
+
+                from rag_core.postprocessing.citations import CitationFormatter
+                bundle = CitationFormatter().format(citations)
+                raw_ans = naive_res.get("answer", "")
+                if bundle.inline_text:
+                    full_answer = f"{raw_ans}\n\n**Sources:**\n{bundle.inline_text}"
+                else:
+                    full_answer = raw_ans
+
+                words = full_answer.split(" ")
+                for i, w in enumerate(words):
+                    token = w + (" " if i < len(words) - 1 else "")
+                    yield f'event: token\ndata: {{"content": {json.dumps(token, ensure_ascii=False)}, "seq": {i + 1}}}\n\n'
+                    await asyncio.sleep(0.012)
+
+                exec_elapsed_ms = (time.perf_counter() - t_exec_start) * 1000.0
+                total_elapsed_ms = round(queue_wait_ms + exec_elapsed_ms, 2)
+                session_latencies = {
+                    "queue_wait_ms": queue_wait_ms,
+                    "retrieval_ms": round(naive_res.get("retrieval_latency", 0.0) * 1000, 2),
+                    "synthesis_ms": round(naive_res.get("generation_latency", 0.0) * 1000, 2),
+                    "total_ms": total_elapsed_ms
+                }
+
+                stored_session = await self.session_store.append_turn(
+                    session_id=session_id,
+                    user_query=request.query,
+                    assistant_answer=full_answer,
+                    citations=citations,
+                    latencies=session_latencies,
+                    selected_chapters=request.selected_chapters,
+                    q_and_a_summary=raw_ans[:200]
+                )
+                turn_id = (
+                    stored_session.turns[-1].turn_pair_id
+                    if stored_session and stored_session.turns
+                    else None
+                )
+
+                citations_dict_list = [
+                    {
+                        "doc_id": c.doc_id,
+                        "page": c.page,
+                        "filename": c.filename,
+                        "score": c.score,
+                        "chunk_id": c.chunk_id,
+                        "book_page": getattr(c, "book_page", None),
+                        "citation": getattr(c, "citation", None),
+                    }
+                    for c in citations
+                ]
+
+                prompt_tokens = 2000
+                completion_tokens = max(1, int(len(full_answer.split()) * 1.3))
+                cost_1k = OperationalMetricsTracker.calculate_cost_1k(prompt_tokens, completion_tokens)
+                self.tracker.record_request_finish(
+                    start_time=start_time,
+                    queue_wait_ms=queue_wait_ms,
+                    total_latency_ms=total_elapsed_ms,
+                    circuit_breaker_tripped=False,
+                    cache_hit=False,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens
+                )
+
+                final_payload = {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "raw_query": request.query,
+                    "effective_query": request.query,
+                    "query_rewritten": False,
+                    "citations": citations_dict_list,
+                    "is_refusal": False,
+                    "conversational_context_badge": "پایپ‌لاین پایه (Naive Baseline)",
+                    "intent_tier": "curriculum" if filter_source == "science_textbook" else "administrative_faq",
+                    "context_need_tier": "needs_retrieve_only",
+                    "ttft_ms": round(queue_wait_ms + 40.0, 2),
+                    "total_ms": total_elapsed_ms,
+                    "latency_profile": session_latencies,
+                    "cost_1k": cost_1k,
+                    "trace_id": naive_res.get("trace_id", ""),
+                    "q_and_a_summary": raw_ans[:200],
+                    "summary": raw_ans[:200],
+                }
+                if self.naive_pipeline.tracker and self.naive_pipeline.tracker.is_active:
+                    self.naive_pipeline.tracker.flush()
+                yield f'event: done\ndata: {json.dumps(final_payload, ensure_ascii=False)}\n\n'
+                return
 
             t_exec_start = time.perf_counter()
             token_seq = 0
@@ -307,12 +569,19 @@ class RAGService:
             async def status_cb(step: str, title: str) -> None:
                 await event_queue.put(("status", {"step": step, "title": title}))
 
+            req_sources = request.selected_sources
+            if not req_sources and request.source:
+                req_sources = [request.source]
+            req_faq_cats = request.selected_faq_categories or request.selected_categories
+
             stream_iter = (
                 self.enterprise_graph.astream_tokens(
                     query=request.query,
                     session_id=session_id,
                     history=history_turns if history_turns else None,
                     selected_chapters=request.selected_chapters,
+                    selected_sources=req_sources,
+                    selected_faq_categories=req_faq_cats,
                     config={
                         "selected_context_turn_id": request.selected_context_turn_id,
                         "history_enabled": request.history_enabled
@@ -375,11 +644,12 @@ class RAGService:
             session_latencies["total_ms"] = total_elapsed_ms
 
             # Extract structured summary from streaming session (User Story 5)
-            q_and_a_summary = (
+            raw_sum = (
                 active_engine.get_summary_for_session(session_id)
                 if hasattr(active_engine, "get_summary_for_session")
                 else None
             )
+            q_and_a_summary = raw_sum if isinstance(raw_sum, str) else None
             if not q_and_a_summary and not is_refusal and accumulated_answer:
                 q_and_a_summary = accumulated_answer[:250].strip()
 
@@ -430,14 +700,22 @@ class RAGService:
                     reordered_secs = getattr(active_engine, "last_reordered_sections", [])
                     ttft = getattr(active_engine, "last_ttft_ms", None)
 
+                    recorded_full_prompt = (
+                        active_engine.get_full_prompt_for_session(session_id)
+                        if hasattr(active_engine, "get_full_prompt_for_session")
+                        else getattr(active_engine, "last_full_prompt", "")
+                    )
+
                     trace_res = active_engine.tracker.trace_advanced_pipeline(
-                        name="webui_stream_chat",
+                        name="advanced_pipeline",
                         question=request.query,
                         answer=accumulated_answer,
                         is_refusal=is_refusal,
                         session_id=session_id,
                         turn_pair_id=turn_id,
-                        tags=["webui", "stream", "pipeline:advanced"],
+                        full_prompt=recorded_full_prompt or "",
+                        raw_completion=accumulated_answer,
+                        tags=["pipeline:advanced", f"source:{request.source or 'science_textbook'}", "mode:stream", "webui"],
                         metadata={
                             "effective_query": effective_query,
                             "turn_pair_id": turn_id,
@@ -481,6 +759,8 @@ class RAGService:
                     "filename": c.filename,
                     "score": getattr(c, "score", 0.0),
                     "chunk_id": getattr(c, "chunk_id", ""),
+                    "book_page": getattr(c, "book_page", None),
+                    "citation": getattr(c, "citation", None),
                 }
                 for c in citations
             ]
@@ -507,6 +787,8 @@ class RAGService:
                 "latency_profile": session_latencies,
                 "cost_1k": cost_1k,
                 "trace_id": stream_trace_id,
+                "q_and_a_summary": q_and_a_summary,
+                "summary": q_and_a_summary,
             }
             yield f'event: done\ndata: {json.dumps(done_payload, ensure_ascii=False)}\n\n'
 

@@ -55,6 +55,12 @@ class PageCitation:
     score: float = 0.0
     """Retrieval similarity score of the source chunk."""
 
+    book_page: Optional[int] = None
+    """Actual textbook page number for user-facing visual citations."""
+
+    citation: Optional[str] = None
+    """Complete formatted Persian citation string."""
+
 
 @dataclass
 class CitationBundle:
@@ -105,6 +111,14 @@ DOC_TO_CHAPTER: Dict[str, Tuple[int, str]] = {
 }
 
 
+def _extract_start_page_from_filename(filename: str) -> int:
+    import re
+    m = re.search(r'-(\d+)-(\d+)\.pdf$', filename)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
 def _resolve_pdf_key(c: PageCitation) -> str:
     """Resolve a citation object to its exact underlying PDF filename."""
     import re
@@ -139,13 +153,23 @@ def _format_inline(citations: List[PageCitation]) -> str:
     """
     Build a numbered citation block grouped by document using strict Markdown links.
 
-    Documents are listed in the order their first citation appears.
-    Pages within a document are deduplicated and sorted.
+    Uses visual format:
+        [1] [فصل {ch_num} - {ch_title} – صفحه {book_page}](/api/v1/pdf/{pdf_file}#page={pure_page})
+    where book_page is computed as (start_page + pure_page - 1) for user guidance,
+    while pure_page is retained in the URL fragment so clicking navigates immediately.
     """
     seen: Dict[str, List[int]] = {}
     order: List[str] = []
+    faq_citations: List[str] = []
 
     for c in citations:
+        # Check if FAQ citation
+        if "faq" in c.doc_id.lower() or "faq" in c.filename.lower() or (c.citation and "پرسش‌های متداول" in c.citation):
+            cit_label = c.citation or f"پرسش‌های متداول (FAQ) – {c.filename}"
+            if cit_label not in faq_citations:
+                faq_citations.append(cit_label)
+            continue
+
         key = _resolve_pdf_key(c)
         if key not in seen:
             seen[key] = []
@@ -154,24 +178,34 @@ def _format_inline(citations: List[PageCitation]) -> str:
             seen[key].append(c.page)
 
     lines = []
-    for i, pdf_file in enumerate(order, start=1):
-        pages = sorted(seen[pdf_file])
+    curr_idx = 1
+    for pdf_file in order:
+        pure_pages = sorted(seen[pdf_file])
         ch_info = DOC_TO_CHAPTER.get(pdf_file)
+        start_page = _extract_start_page_from_filename(pdf_file)
+
         if ch_info:
-            ch_num, _ = ch_info
-            if len(pages) == 1:
-                p = pages[0]
-                lines.append(f"[{i}] [فصل {ch_num}، صفحه {p}](/api/v1/pdf/{pdf_file}#page={p})")
+            ch_num, ch_title = ch_info
+            if len(pure_pages) == 1:
+                p = pure_pages[0]
+                book_p = start_page + p - 1
+                lines.append(f"[{curr_idx}] [فصل {ch_num} - {ch_title} – صفحه {book_p}](/api/v1/pdf/{pdf_file}#page={p})")
             else:
-                p_str = "، ".join(str(p) for p in pages)
-                lines.append(f"[{i}] [فصل {ch_num}، صفحات {p_str}](/api/v1/pdf/{pdf_file}#page={pages[0]})")
+                book_pages = [start_page + p - 1 for p in pure_pages]
+                p_str = "، ".join(str(bp) for bp in book_pages)
+                lines.append(f"[{curr_idx}] [فصل {ch_num} - {ch_title} – صفحات {p_str}](/api/v1/pdf/{pdf_file}#page={pure_pages[0]})")
         else:
-            if len(pages) == 1:
-                p = pages[0]
-                lines.append(f"[{i}] [{pdf_file} – page {p}](/api/v1/pdf/{pdf_file}#page={p})")
+            if len(pure_pages) == 1:
+                p = pure_pages[0]
+                lines.append(f"[{curr_idx}] [{pdf_file} – صفحه {p}](/api/v1/pdf/{pdf_file}#page={p})")
             else:
-                p_str = "، ".join(str(p) for p in pages)
-                lines.append(f"[{i}] [{pdf_file} – pages {p_str}](/api/v1/pdf/{pdf_file}#page={pages[0]})")
+                p_str = "، ".join(str(p) for p in pure_pages)
+                lines.append(f"[{curr_idx}] [{pdf_file} – صفحات {p_str}](/api/v1/pdf/{pdf_file}#page={pure_pages[0]})")
+        curr_idx += 1
+
+    for faq_cit in faq_citations:
+        lines.append(f"[{curr_idx}] {faq_cit}")
+        curr_idx += 1
 
     return "\n".join(lines)
 
@@ -218,7 +252,7 @@ class CitationFormatter:
         citations: List[PageCitation] = []
 
         for chunk in chunks[:max_citations]:
-            doc_id, page, chunk_id, score, filename, bbox = self._extract_fields(chunk)
+            doc_id, page, chunk_id, score, filename, bbox, book_page, citation_str = self._extract_fields(chunk)
             citations.append(
                 PageCitation(
                     doc_id=doc_id,
@@ -227,6 +261,8 @@ class CitationFormatter:
                     bbox=bbox,
                     chunk_id=chunk_id,
                     score=score,
+                    book_page=book_page,
+                    citation=citation_str,
                 )
             )
 
@@ -254,7 +290,7 @@ class CitationFormatter:
     @staticmethod
     def _extract_fields(
         chunk: Any,
-    ) -> Tuple[str, int, str, float, str, Optional[Tuple]]:
+    ) -> Tuple[str, int, str, float, str, Optional[Tuple], Optional[int], Optional[str]]:
         """Extract citation fields from a chunk object or dict."""
         if isinstance(chunk, dict):
             doc_id = chunk.get("doc_id", "")
@@ -263,6 +299,9 @@ class CitationFormatter:
             score = float(chunk.get("score", 0.0))
             meta = chunk.get("metadata", {}) or {}
             bbox_raw = chunk.get("bbox")
+            filename = chunk.get("filename", "") or chunk.get("source_name", "")
+            book_page = chunk.get("book_page")
+            citation_str = chunk.get("citation")
         else:
             doc_id = getattr(chunk, "doc_id", "")
             page = int(getattr(chunk, "page", 0))
@@ -270,13 +309,42 @@ class CitationFormatter:
             score = float(getattr(chunk, "score", 0.0))
             meta = getattr(chunk, "metadata", {}) or {}
             bbox_raw = getattr(chunk, "bbox", None)
+            filename = getattr(chunk, "filename", "") or getattr(chunk, "source_name", "")
+            book_page = getattr(chunk, "book_page", None)
+            citation_str = getattr(chunk, "citation", None)
 
-        filename = meta.get("filename", "") if isinstance(meta, dict) else ""
+        if not filename and isinstance(meta, dict):
+            filename = meta.get("filename", "") or meta.get("source_name", "")
         if not filename:
             filename = doc_id  # fall back to doc_id if filename not in metadata
 
+        if not book_page and isinstance(meta, dict):
+            book_page = meta.get("book_page")
+        if not citation_str and isinstance(meta, dict):
+            citation_str = meta.get("citation")
+
+        category = None
+        row = None
+        if isinstance(chunk, dict):
+            category = chunk.get("category") or meta.get("category")
+            row = chunk.get("row") or meta.get("row") or meta.get("row_index")
+        else:
+            category = getattr(chunk, "category", None) or meta.get("category")
+            row = getattr(chunk, "row", None) or meta.get("row") or meta.get("row_index")
+
+        is_faq = (
+            doc_id == "administrative_faq"
+            or "faq" in str(doc_id).lower()
+            or (isinstance(meta, dict) and meta.get("source_type") == "administrative_faq")
+            or getattr(chunk, "source_type", None) == "administrative_faq"
+        )
+        if is_faq and not citation_str:
+            cat_display = category or "عمومی"
+            row_display = row if row is not None else page
+            citation_str = f"پرسش‌های متداول – دسته: {cat_display} – ردیف: {row_display}"
+
         bbox: Optional[Tuple] = tuple(bbox_raw) if bbox_raw else None
-        return doc_id, page, chunk_id, score, filename, bbox
+        return doc_id, page, chunk_id, score, filename, bbox, book_page, citation_str
 
 
 # ---------------------------------------------------------------------------

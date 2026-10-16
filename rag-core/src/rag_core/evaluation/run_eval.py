@@ -77,8 +77,13 @@ class BaselineManager:
         self._latest_path = self._dir / "baseline_latest.json"
 
     def save(self, report: EvaluationReport) -> Path:
-        """Save report snapshot as baseline_latest.json and timestamped copy."""
-        data = report.model_dump()
+        from dataclasses import is_dataclass, asdict
+        if hasattr(report, "model_dump"):
+            data = report.model_dump()
+        elif is_dataclass(report):
+            data = asdict(report)
+        else:
+            data = dict(report)
         ts = report.timestamp.replace(":", "-").replace("+", "_")[:19]
         snapshot_path = self._dir / f"baseline_{ts}.json"
 

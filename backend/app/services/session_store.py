@@ -151,6 +151,7 @@ class InMemorySessionStore(ISessionStore):
                 timestamp=now,
                 citations=citations,
                 latency_profile=latencies,
+                q_and_a_summary=q_and_a_summary,
                 metadata=asst_metadata
             )
         )
@@ -325,6 +326,7 @@ class RedisSessionStore(ISessionStore):
                 timestamp=now,
                 citations=citations,
                 latency_profile=latencies,
+                q_and_a_summary=q_and_a_summary,
                 metadata=asst_metadata
             )
         )

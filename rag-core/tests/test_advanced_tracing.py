@@ -219,11 +219,134 @@ class TestAdvancedTracingStructure(unittest.TestCase):
         offline_tracker.client = None
 
         trace_id = offline_tracker.trace_advanced_pipeline(
-            name="advanced_science_rag",
+            name="advanced_pipeline",
             question="تست",
             answer="پاسخ",
         )
         self.assertEqual(trace_id, "offline_trace")
+
+        naive_trace_id = offline_tracker.trace_naive_pipeline(
+            name="naive_pipeline",
+            question="تست",
+            answer="پاسخ",
+        )
+        self.assertEqual(naive_trace_id, "offline_trace")
+
+    def test_trace_naive_pipeline_creates_two_stage_hierarchy(self):
+        """Verify that trace_naive_pipeline constructs retrieval and response_synthesis stages."""
+        sources = [
+            {
+                "chunk_id": "ch_01",
+                "source_type": "science_textbook",
+                "source_name": "science.pdf",
+                "score": 0.85,
+                "metadata": {"chapter": 7, "page": 86, "book_page": 86}
+            }
+        ]
+
+        trace_id = self.tracker.trace_naive_pipeline(
+            name="naive_pipeline",
+            question="چگالی چیست؟",
+            answer="چگالی جرم واحد حجم ماده است.",
+            session_id="sess_123",
+            turn_pair_id="turn_456",
+            source="science_textbook",
+            top_k=3,
+            retriever_type="qdrant",
+            retrieved_chunks=sources,
+            chapters=[7],
+            retrieval_latency_ms=18.5,
+            synthesis_latency_ms=450.0,
+            prompt_tokens=150,
+            completion_tokens=40,
+            tags=["mode:stream", "webui"],
+            latencies={"retrieval_ms": 18.5, "synthesis_ms": 450.0, "total_ms": 468.5}
+        )
+
+        self.assertEqual(trace_id, "trace_root_123")
+
+        # Verify Root Trace observation
+        self.mock_client.start_observation.assert_called_once()
+        root_call_kwargs = self.mock_client.start_observation.call_args.kwargs
+        self.assertEqual(root_call_kwargs["name"], "naive_pipeline")
+        self.assertEqual(root_call_kwargs["as_type"], "chain")
+        self.assertIn("cost_breakdown", root_call_kwargs["metadata"])
+        self.assertEqual(root_call_kwargs["metadata"]["retriever_type"], "qdrant")
+
+        # Verify child observations: retrieval and response_synthesis
+        child_names = [call.kwargs.get("name") for call in self.mock_root.start_observation.call_args_list]
+        self.assertIn("retrieval", child_names)
+        self.assertIn("response_synthesis", child_names)
+
+        child_types = {call.kwargs.get("name"): call.kwargs.get("as_type") for call in self.mock_root.start_observation.call_args_list}
+        self.assertEqual(child_types["retrieval"], "retriever")
+        self.assertEqual(child_types["response_synthesis"], "generation")
+
+    def test_trace_advanced_pipeline_chronological_ordering(self):
+        """Verify that all pipeline stages receive strictly increasing synthetic timestamps."""
+        created_spans = []
+
+        def mock_start(**kwargs):
+            obs = MagicMock()
+            obs.name = kwargs.get("name")
+            obs.kwargs = kwargs
+            obs._otel_span = MagicMock()
+            obs.end = MagicMock(side_effect=lambda end_time=None: setattr(obs, "recorded_end_time", end_time))
+            obs.start_observation = mock_start
+            created_spans.append(obs)
+            return obs
+
+        self.mock_client.start_observation = mock_start
+
+        from rag_core.indexing.science_schema import QueryGateDecision, CurriculumIntentTier, ContextNeedTier, SelectedHistoryItem, HistoryRelevanceTier
+        rw = QueryGateDecision(
+            raw_query="یکایش چیه؟",
+            effective_query="یکایش چیه؟",
+            intent_tier=CurriculumIntentTier.RELEVANT,
+            context_need_tier=ContextNeedTier.NEEDS_HISTORY_ONLY,
+            selected_history_items=[
+                SelectedHistoryItem(
+                    turn_id="t1",
+                    turn_index=0,
+                    is_recent_5=True,
+                    content_type="summary",
+                    question="چگالی چیست؟",
+                    answer="جرم بر حجم",
+                    summary="خلاصه چگالی",
+                    relevance_tier=HistoryRelevanceTier.NEEDED_RELEVANT
+                )
+            ]
+        )
+
+        self.tracker.trace_advanced_pipeline(
+            name="advanced_pipeline",
+            question="یکایش چیه؟",
+            answer="کیلوگرم بر متر مکعب",
+            rewrite_decision=rw,
+            history=[{"role": "user", "content": "چگالی چیست؟"}],
+            full_prompt="System: Grounded\nUser: <context>...</context>\nQuestion: یکایش چیه؟",
+            latencies={"gate1_ms": 50.0, "distill_ms": 20.0, "subq_model2_ms": 30.0, "synthesis_ms": 200.0}
+        )
+
+        stage_obs = {s.name: s for s in created_spans}
+        self.assertIn("query_gate", stage_obs)
+        self.assertIn("query_transformation", stage_obs)
+        self.assertIn("conversational_memory", stage_obs)
+        self.assertIn("response_synthesis", stage_obs)
+
+        gate_start = stage_obs["query_gate"]._otel_span._start_time
+        trans_start = stage_obs["query_transformation"]._otel_span._start_time
+        mem_start = stage_obs["conversational_memory"]._otel_span._start_time
+        synth_start = stage_obs["response_synthesis"]._otel_span._start_time
+
+        self.assertLess(gate_start, trans_start)
+        self.assertLess(trans_start, mem_start)
+        self.assertLess(mem_start, synth_start)
+
+        # Check that response_synthesis received the full prompt containing context
+        synth_input = stage_obs["response_synthesis"].kwargs.get("input")
+        self.assertIn("<context>", synth_input)
+        self.assertIn("یکایش چیه؟", synth_input)
 
 
 if __name__ == "__main__":

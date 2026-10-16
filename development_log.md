@@ -2,6 +2,98 @@
 
 All architectural decisions, milestone completions, evaluation metrics, and progressive optimizations are recorded here chronologically.
 
+## [2026-10-15] Milestone 32: Qdrant Priority for Baseline Pipeline & Canonical Langfuse Trace Architecture (naive_pipeline & advanced_pipeline)
+- **Context & Goal**: Elevate the Naive Baseline pipeline to prioritize persistent vector search via Qdrant on the isolated `naive_baseline_chunks` collection (539 points), keeping in-memory NumPy as an emergency zero-lock fallback. Establish strict, canonical root trace naming in Langfuse (`naive_pipeline` vs `advanced_pipeline`) eliminating all mixed/ad-hoc trace names (`webui_chat`, `webui_stream_chat`, `rag_query`, `advanced_science_rag`) and implement a dedicated 2-stage hierarchical observation structure for the baseline pipeline matching OpenInference standards.
+- **Architectural Enhancements Implemented**:
+  1. **Qdrant Vector Database as Primary Baseline Retriever**:
+     - Updated `NaiveRAGPipeline.__init__` (`retriever_type="auto"`) to prioritize `QdrantRetriever` connecting to `naive_baseline_chunks`.
+     - Invokes `ensure_collection()`, creating collection if missing and auto-populating all 539 vectors directly from precomputed `naive_index.npz` and `naive_metadata.json` without re-embedding.
+     - Retains `NaiveRetriever.load_cache()` strictly as a fallback if Qdrant is locked by external processes or unavailable.
+  2. **Canonical Root Trace Naming Standards**:
+     - Standardized root trace names across the entire backend, CLI, and tests:
+       - `advanced_pipeline`: Root name for all Advanced RAG traces (sync and stream).
+       - `naive_pipeline`: Root name for all Naive Baseline traces (sync and stream).
+     - Completely eliminated ad-hoc trace names: `webui_chat`, `webui_stream_chat`, `rag_query`, and `advanced_science_rag`.
+     - Mode and client context are cleanly preserved in tags (`["pipeline:advanced"|"pipeline:naive", "source:...", "mode:sync"|"mode:stream", "webui"]`) and metadata (`latency_profile`, `cost_breakdown`).
+  3. **Dedicated 2-Stage Hierarchical Tracing for Naive Pipeline**:
+     - Implemented `LangfuseTracker.trace_naive_pipeline()`:
+       - Root Observation: `naive_pipeline` (type: `chain`, inputs: query, source, chapters, categories; outputs: answer).
+       - Child Stage 1: `retrieval` (type: `retriever`, input: query and filters, output: retrieved chunks, metadata: `vector_db="qdrant"|"numpy_in_memory"`, `collection_name="naive_baseline_chunks"`, latency).
+       - Child Stage 2: `response_synthesis` (type: `generation`, input: query, output: answer, model, token usage, cost calculation, latency).
+  4. **Backend Routing & Trace Isolation**:
+     - In `backend/app/services/rag_service.py` (`execute_chat` and `execute_chat_stream`), isolated trace recording so naive queries NEVER invoke `trace_advanced_pipeline`, flushing `naive_pipeline.tracker` cleanly.
+  5. **Verification & Testing**:
+     - Verified unit tests in `rag-core/tests/test_advanced_tracing.py` (4/4 passed).
+     - Verified integration tests in `backend/tests/test_chat_endpoints.py` (16/16 passed including trace isolation test).
+     - Verified live server query log showing `naive_baseline_chunks` auto-populated in Qdrant with 539 points and successfully queried.
+
+---
+
+## [2026-10-15] Milestone 31: Elimination of Raw PDF URLs & Full Visual Persian Badge Citations
+- **Context & Goal**: Completely eliminate raw technical PDF URLs (`/api/v1/pdf/...`) from the visible text in user chat messages. Ensure all citations strictly display as clean, clickable Persian badges (`[1] فصل ۱۰ - گرما و بهینه‌سازی مصرف انرژی – صفحه ۸۶`), routing seamlessly to `/api/v1/pdf/{filename}#page={pure_page}` on click.
+- **Architectural Enhancements Implemented**:
+  1. **Clean Visual Citation Rendering**:
+     - Updated `formatChapterCitationLabel` in `ChatMessage.tsx` to normalize Persian/Arabic digits and automatically resolve chapter numbers and page numbers even when given full URLs or chapter-only strings.
+     - Automatically converts raw `/api/v1/pdf/C706...#page=X` URLs in plain text into clickable markdown links `[Label](URL)` before rendering.
+     - In the bottom Sources section, sanitized `uniqueCitations` so that any PDF URL or file in `linkText` or `plainText` is converted to clean `{ label: cleanLabel, url: targetUrl }` with no ugly URL text.
+     - In ReactMarkdown `a` renderer, intercept any `children` text matching `/api/v1/pdf/` or `C706...` or `فصل...` and format it via `formatChapterCitationLabel`, guaranteeing that the user NEVER sees raw `/api/v1/pdf/...` text.
+  2. **Context Block Book Page Calculation**:
+     - Updated `_build_context_block` in `synthesizer.py` to calculate `book_p = start_page + page - 1` using `_extract_start_page_from_filename`, ensuring LLM prompts and completions use actual printed book page numbers.
+  3. **Verification**:
+     - Captured live browser screenshots confirming that citation pills display solely Persian chapter titles and actual book pages (`[1] فصل 10 - گرما و بهینه‌سازی مصرف انرژی – صفحه 86`) with zero visible `/api/v1/pdf/...` text.
+     - Verified all 20 test cases in `backend/tests` and `rag-core/tests` pass (`20 passed in 1.75s`).
+     - Verified TypeScript check passed with 0 errors (`pnpm exec tsc --noEmit`).
+
+---
+
+## [2026-10-15] Milestone 30: Exact Book Page & Persian Chapter Citation Standard, Isolated Naive Pipeline Routing & Multi-Source UI Switcher
+- **Context & Goal**: Resolve misleading chapter-relative page numbers in textbook citations by computing true printed book pages from chapter filename bounds (`start_page + page - 1`) while retaining pure page indices for instant PDF viewer deep-linking. Provide complete UI support for switching between Naive Baseline and Advanced Enterprise pipelines, and between 7th-Grade Science Textbook and Administrative FAQ sources with distinct visual branding.
+- **Architectural Enhancements Implemented**:
+  1. **Standardized Persian Chapter & Book Page Citation**:
+     - Standardized citation string format across loader, database builder, and backend:
+       `"citation": f"فصل {chapter_num} - {chapter_title} – صفحه {book_page}"`
+     - Built `extract_page_range_from_filename(filename)` extracting starting page number X from filenames (e.g. `C706_olom_haftom-7-144-86-97.pdf` -> `start_page = 86`).
+     - Computed user-facing printed page: `book_page = start_page + pure_page - 1` (e.g., page 1 of chapter 10 -> book page 86).
+     - Retained pure `page` (1-indexed relative to chapter PDF) in metadata and links (`/api/v1/pdf/{filename}#page={page}`) ensuring immediate chapter PDF viewer navigation without page offset errors.
+  2. **Database & Index Persistence**:
+     - Ran `build_naive_database.py` with BGE-M3 to regenerate `data_index/naive_metadata.json` and `data_index/naive_index.npz` (539 vectors):
+       - 134 Administrative FAQ records with embeddings generated strictly from the `question` field, storing `category` for keyword pre-filtering.
+       - 405 Science Textbook chunks with computed `book_page`, `chapter_title`, and standardized citations.
+  3. **Backend Service & Streaming Routing**:
+     - Extended `ChatRequest` schema in `app/schemas/chat.py` with `pipeline_mode`, `source`, and `selected_categories`.
+     - In `RAGService` (`execute_chat` and `execute_chat_stream`), added execution path for `request.pipeline_mode == "naive"` routing to `NaiveRAGPipeline` with source, chapter, and category pre-filtering, bypassing conversational memory and multi-step expansion.
+     - Enriched outbound citations with `book_page` and `citation` strings.
+  4. **Frontend Multi-Source Header & Modal Components**:
+     - Created `frontend/src/components/FAQCategoryModal.tsx` for toggling the 9 administrative FAQ categories.
+     - Updated `ChatHeader.tsx` with:
+       - Segmented switcher for Pipeline Mode (`پیشرفته` vs `پایه (Naive)`).
+       - Segmented switcher for Knowledge Source (`کتاب علوم هفتم` vs `پرسش‌های متداول`).
+       - Distinct visual branding: Emerald `FAQ` emblem badge and INIF title vs primary `۷م` badge.
+     - Updated `ChatMessage.tsx` to display `فصل {ch} - {name} – صفحه {book_page}` and handle both book PDF links and plain FAQ citations.
+  5. **Verification**:
+     - Verified unit tests in `rag-core/tests/test_naive_retriever.py` (5/5 passed).
+     - Verified integration tests in `backend/tests/test_chat_endpoints.py` (15/15 passed).
+     - Verified frontend type checking (`pnpm exec tsc --noEmit` exited 0).
+
+---
+
+## [2026-10-15] Milestone 29: Naive Baseline Multi-Source Adaptation & Isolated Vector Database Filtering
+- **Context & Goal**: Enable clean apples-to-apples empirical evaluation between Naive Baseline and Advanced Enterprise Pipeline. Ensure `NaiveRAGPipeline` supports both Science Textbook and FAQ sources with strict isolation from advanced indexes, preventing schema/corpus mixing and allowing controlled benchmarking.
+- **Architectural Enhancements Implemented**:
+  1. **Strict Index & Collection Isolation**:
+     - Configured dedicated `naive_qdrant_collection_name = "naive_baseline_chunks"` in `rag_core/config.py`.
+     - Ensured `QdrantRetriever` and `NaiveRetriever` operate exclusively on `naive_baseline_chunks` and `data_index/naive_index.npz` (539 chunks), keeping them 100% segregated from advanced collections (`science_textbook_dense` and upcoming `faq_admin_dense`).
+  2. **In-Memory & Vector Source Pre-Filtering**:
+     - Added `filter_source_type` support to `NaiveRetriever.retrieve()`: filters candidate vector rows before taking top-k, delivering instant source-isolated cosine search directly on `naive_index.npz`.
+     - Forwarded `source` parameter from `NaiveRAGPipeline.query(question, source="science_textbook" | "administrative_faq")` to retriever.
+  3. **Evaluation Metadata Alignment**:
+     - Updated `document_loader.py` to inject `page`, `filename`, and `gold_identifier` (`{pdf_name}#page={page_idx}`) for textbook pages and `faq_qa_pairs.csv#row={row_idx}` for FAQs.
+  4. **Verification & Tests**:
+     - Added unit tests in `rag-core/tests/test_naive_retriever.py` verifying that queries with `source="science_textbook"` return 100% science chunks and queries with `source="administrative_faq"` return 100% FAQ chunks. 4/4 tests passing in 0.03s.
+- **Next Planned Step**: Formalize Feature 008 (`specs/008-faq-source-integration`) via `/speckit-specify` for the multi-source UI header and advanced pipeline FAQ indexing.
+
+---
+
 ## [2026-10-14] Milestone 28: Multi-Suite Benchmark Datasets, SubQ System One LLM Judge, Decoupled Attribution Matrix & Live Frontend Dashboard (Feature 007)
 - **Context & Goal**: Implement Feature 007 (`specs/007-comprehensive-benchmarks-subq-judge`), resolving the core project issue of outdated, anecdotal "vibe" testing and artificial 100% benchmark saturation. Build an empirical, multi-suite benchmark architecture, deterministic code gates (< 5ms, 0 tokens), high-throughput SubQ Decision Model LLM-as-a-Judge, decoupled 2x2 retrieval vs. generation diagnostic matrix, mentor-ready executive KPI reports, and an interactive Frontend Evaluation Dashboard for live pipeline testing.
 - **Architectural Enhancements Implemented**:
@@ -784,8 +876,35 @@ All architectural decisions, milestone completions, evaluation metrics, and prog
   - Tested `execute_chat_stream` end-to-end: tokens stream cleanly, `done` event emits with full citations, TTFT and total latency.
   - Verified test suite: 18/18 backend pytest tests passed, 66/66 unittest tests passed, 5/5 LangGraph enterprise graph tests passed (89 passing tests).
   - Verified backend server running on port 8000 (tab `c6`) actively serving `GET /api/v1/health` with `200 OK`.
-- **Next Planned Step**: Guide the user to test a live query in the Next.js UI at `http://localhost:3000` and confirm that answers, citations, and latency waterfalls display smoothly.
 
-
-
-
+### Milestone 2026-10-15 23:30: Milestone 29 - Hierarchical SubQ Multi-Source Router & Compound Corpus Dispatcher (Feature 008)
+- **Goal**: Integrate the 134-item `administrative_faq` collection into the Advanced Enterprise RAG Pipeline alongside the 7th-grade science textbook curriculum with autonomous Level-0 SubQ source routing, explicit single-source bypass, parallel cross-corpus retrieval, and partitioned grounded synthesis.
+- **Architecture & Deliverables**:
+  1. **Phase 1: Setup & Assets**:
+     - Built lexical FAQ dataset builder in [build_faq_bm25.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/indexing/build_faq_bm25.py), generating 134 chunks into `data_index/faq_bm25.pkl` with Hazm Persian tokenizer.
+     - Added grounded prompt personas in [prompts.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/generation/prompts.py): `SYSTEM_PROMPT_ADMIN_FAQ_GROUNDED` for INIF consultant advisory and `SYSTEM_PROMPT_COMPOSITE_GROUNDED` for partitioned cross-corpus inquiries.
+  2. **Phase 2: Foundational Schemas & Retrievers**:
+     - Extended [science_schema.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/indexing/science_schema.py) with `SourceDomain`, `Level0RoutingTier`, `Level0RoutingDecision`, and FAQ metadata (`category`, `row`).
+     - Implemented `MultiCorpusBM25Retriever` in [bm25.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/retrieval/bm25.py) supporting lexical query routing and category pre-filtering across `science_bm25.pkl` and `faq_bm25.pkl`.
+     - Added pass-through expansion in [section_expansion.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/postprocessing/section_expansion.py) for FAQ chunks without chapter book lookups.
+     - Implemented FAQ citation formatting (`[پرسش‌های متداول – دسته: {category} – ردیف: {row}]`) in [citations.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/postprocessing/citations.py).
+  3. **Phase 3: User Story 1 - Autonomous Level-0 Source Routing**:
+     - Implemented `Level0SourceRouter` in [jev_router.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/query/jev_router.py) with TypeSafe Choice sub-25ms classification and deterministic keyword fallback.
+     - Wired single-source explicit manual bypass and StateGraph entry node wiring in [pipeline_graph.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/graph/pipeline_graph.py) and [nodes.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/graph/nodes.py).
+  4. **Phase 4: User Story 2 - Compound Cross-Corpus Query & Multi-Source Dispatch**:
+     - Implemented domain-customized Decision Model 1 (DM1) in [query_gate.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/query/query_gate.py) with domain-specific relevance criteria and keyword fallbacks.
+     - Enabled concurrent parallel DM1 execution via `asyncio.gather(sci_task, faq_task)` and parallel multi-source hybrid retrieval across Science and FAQ collections in [nodes.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/graph/nodes.py).
+     - Built partitioned dual-grounded synthesis in [synthesizer.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/rag-core/src/rag_core/generation/synthesizer.py) (`### ۱. مفاهیم علمی (کتاب علوم)` and `### ۲. مقررات و تسهیلات (صندوق نوآوری)`).
+  5. **Phase 5: User Story 3 - Full Administrative FAQ Pipeline Parity**:
+     - Implemented category payload pre-filtering in Qdrant and BM25 retrievers.
+     - Added FAQ-only graph routing and execution path with INIF consultant persona.
+  6. **Phase 6: User Story 4 - UI & Fullstack Contracts**:
+     - Updated backend request schemas in [chat.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/backend/app/schemas/chat.py) and service layer [rag_service.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/backend/app/services/rag_service.py) supporting `selected_sources` and `selected_faq_categories`.
+     - Extended TypeScript contracts in [index.ts](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/frontend/src/types/index.ts).
+     - Added 3-way corpus toggle (`کتاب علوم`, `پرسش‌های متداول`, `همه منابع (ترکیبی)`) in [ChatHeader.tsx](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/frontend/src/components/ChatHeader.tsx).
+     - Updated [ChatMessage.tsx](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/frontend/src/components/ChatMessage.tsx) to render distinct FAQ category badge chips, science chapter badge chips, and composite citation section headings.
+     - Added multi-source API endpoint tests in [test_chat_endpoints.py](file:///Users/hmd/Documents/Obisidan/My-second-mind/Mentorship/Projects/Unified_RAG/backend/tests/test_chat_endpoints.py).
+- **Verification & Test Suite**:
+  - Full regression test suite passed: **203 passed in 10.74s** (100% pass rate).
+  - TypeScript typecheck passed cleanly: `tsc --noEmit` exited with code 0.
+- **Next Planned Step**: Perform Codebase Memory Knowledge Graph synchronization and drift detection.

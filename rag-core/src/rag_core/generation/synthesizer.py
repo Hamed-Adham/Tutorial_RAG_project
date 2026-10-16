@@ -93,7 +93,7 @@ def _build_context_block(chunks: List[Any], max_chars: int = 6000) -> str:
     Each chunk is prefixed with its clean Persian chapter, page number, and breadcrumb.
     Context is truncated at *max_chars* to stay within the LLM context window.
     """
-    from rag_core.postprocessing.citations import DOC_TO_CHAPTER
+    from rag_core.postprocessing.citations import DOC_TO_CHAPTER, _extract_start_page_from_filename
 
     parts = []
     total = 0
@@ -109,13 +109,40 @@ def _build_context_block(chunks: List[Any], max_chars: int = 6000) -> str:
             breadcrumb = getattr(chunk, "breadcrumb", "")
             doc_id = getattr(chunk, "doc_id", "") or getattr(chunk, "filename", "")
 
-        pdf_key = doc_id if doc_id.endswith(".pdf") else f"{doc_id}.pdf"
-        ch_info = DOC_TO_CHAPTER.get(pdf_key)
-        if ch_info:
-            ch_num, ch_title = ch_info
-            loc_label = f"فصل {ch_num} ({ch_title})، صفحه {page}" if page else f"فصل {ch_num} ({ch_title})"
+        category = chunk.get("category", "") if isinstance(chunk, dict) else getattr(chunk, "category", "")
+        row = chunk.get("row", 0) if isinstance(chunk, dict) else getattr(chunk, "row", 0)
+        source_domain = chunk.get("source_domain", "") if isinstance(chunk, dict) else getattr(chunk, "source_domain", "")
+        if not source_domain and (doc_id == "administrative_faq" or category or row):
+            source_domain = "administrative_faq"
+        chapter = chunk.get("chapter", 0) if isinstance(chunk, dict) else getattr(chunk, "chapter", 0)
+
+        fa_map = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+        if source_domain == "administrative_faq" or category:
+            if category and row:
+                loc_label = f"صندوق نوآوری – دسته: {category} – ردیف: {row}"
+            elif category:
+                loc_label = f"صندوق نوآوری – دسته: {category}"
+            elif row:
+                loc_label = f"صندوق نوآوری – ردیف: {row}"
+            else:
+                loc_label = "پرسش‌های متداول صندوق نوآوری"
         else:
-            loc_label = f"صفحه {page}" if page else "کتاب درسی"
+            pdf_key = doc_id if doc_id.endswith(".pdf") else f"{doc_id}.pdf"
+            ch_info = DOC_TO_CHAPTER.get(pdf_key)
+            start_page = _extract_start_page_from_filename(pdf_key)
+            if ch_info:
+                ch_num, ch_title = ch_info
+                book_p = start_page + page - 1 if page else start_page
+                ch_fa = str(ch_num).translate(fa_map)
+                book_p_fa = str(book_p).translate(fa_map)
+                loc_label = f"فصل {ch_fa} ({ch_title})، صفحه {book_p_fa}" if page else f"فصل {ch_fa} ({ch_title})"
+            elif chapter:
+                ch_fa = str(chapter).translate(fa_map)
+                p_fa = str(page).translate(fa_map) if page else ""
+                loc_label = f"فصل {ch_fa}، صفحه {p_fa}" if page else f"فصل {ch_fa}"
+            else:
+                loc_label = f"صفحه {page}" if page else "کتاب درسی"
 
         header = f"[{i}] ({loc_label}) - {breadcrumb}" if breadcrumb else f"[{i}] ({loc_label})"
         entry = f"{header}\n{text}"
@@ -256,6 +283,8 @@ class ResponseSynthesizer:
         self._temperature = temperature
         self._context_max_chars = context_max_chars
         self._tracker = tracker
+        self.last_full_prompt: str = ""
+        self.last_context_block: str = ""
         self._citation_formatter = CitationFormatter()
         self._client: Optional[Any] = None  # Lazy-init openai.OpenAI
         self._async_client: Optional[Any] = None  # Lazy-init openai.AsyncOpenAI
@@ -300,13 +329,20 @@ class ResponseSynthesizer:
             user_message = f"<context>\n{context_block}\n</context>\n\nQuestion: {query}"
 
         messages = [{"role": "system", "content": sys_prompt}]
-        if history:
+        has_history_in_chunks = any(
+            isinstance(c, dict) and (c.get("breadcrumb") == "گفتگوی پیشین" or c.get("doc_id") == "conversation_history")
+            for c in chunks
+        )
+        if history and not has_history_in_chunks:
             for turn in history[-4:]:
                 r = turn.get("role", "user")
                 c = turn.get("content", "")
                 if r in ("user", "assistant") and c:
                     messages.append({"role": r, "content": c})
         messages.append({"role": "user", "content": user_message})
+
+        self.last_context_block = context_block
+        self.last_full_prompt = "\n\n".join([f"[{m['role']}]:\n{m['content']}" for m in messages])
 
         try:
             client = self._get_async_client()
@@ -329,30 +365,58 @@ class ResponseSynthesizer:
     @staticmethod
     def parse_answer_and_summary(raw_text: str) -> tuple[str, Optional[str]]:
         """
-        Extract clean answer and structured <!-- SUMMARY --> tag content if present.
+        Extract clean answer and structured memory summary tag content if present.
+        Validates structure using Pydantic TurnMemoryPayload.
         """
         import re
+        from rag_core.indexing.science_schema import TurnMemoryPayload
         if not raw_text:
             return "", None
 
-        match = re.search(r"<!--\s*SUMMARY\s*-->([\s\S]*?)<!--\s*/SUMMARY\s*-->", raw_text, re.IGNORECASE)
-        if match:
-            summary = match.group(1).strip()
+        # 1. Primary explicit tag: <<<MEMORY_SUMMARY_START>>> ... <<<MEMORY_SUMMARY_END>>>
+        match_custom = re.search(r"<<<MEMORY_SUMMARY_START>>>([\s\S]*?)(?:<<<MEMORY_SUMMARY_END>>>|$)", raw_text, re.IGNORECASE)
+        if match_custom:
+            summary = match_custom.group(1).strip()
             summary = re.sub(r"دستورالعمل ثبت خلاصه[^\n]*\n+", "", summary, flags=re.IGNORECASE).strip()
             summary = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", summary, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<<<MEMORY_SUMMARY_START>>>[\s\S]*?(?:<<<MEMORY_SUMMARY_END>>>|$)(?:[\s\S]*$)?", "", raw_text, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"دستورالعمل ثبت خلاصه[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"توجه بسیار مهم[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            try:
+                payload = TurnMemoryPayload(answer=clean_answer, summary=summary, has_explicit_summary=True)
+                return payload.answer, payload.summary
+            except Exception:
+                return clean_answer, summary
 
-            clean_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<!--\s*SUMMARY\s*-->[\s\S]*?<!--\s*/SUMMARY\s*-->", "", raw_text, flags=re.IGNORECASE).strip()
-            clean_answer = re.sub(r"دستورالعمل ثبت خلاصه در حافظه[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
-            clean_answer = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
-            return clean_answer, summary
+        # 2. Standard HTML tag: <!-- SUMMARY --> or <!-- TURN_SUMMARY -->
+        match_html = re.search(r"<!--\s*(?:TURN_)?SUMMARY\s*-->([\s\S]*?)<!--\s*/(?:TURN_)?SUMMARY\s*-->", raw_text, re.IGNORECASE)
+        if match_html:
+            summary = match_html.group(1).strip()
+            summary = re.sub(r"دستورالعمل ثبت خلاصه[^\n]*\n+", "", summary, flags=re.IGNORECASE).strip()
+            summary = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", summary, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<!--\s*(?:TURN_)?SUMMARY\s*-->[\s\S]*?<!--\s*/(?:TURN_)?SUMMARY\s*-->[\s\S]*$", "", raw_text, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"دستورالعمل ثبت خلاصه[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"توجه بسیار مهم[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            try:
+                payload = TurnMemoryPayload(answer=clean_answer, summary=summary, has_explicit_summary=True)
+                return payload.answer, payload.summary
+            except Exception:
+                return clean_answer, summary
 
-        # Alternative Persian marker: ### خلاصه / خلاصه گفت‌وگو:
+        # 3. Alternative Persian marker: ### خلاصه / خلاصه گفت‌وگو:
         match_fa = re.search(r"(?:###|---)\s*(?:خلاصه|خلاصه پرسش و پاسخ|خلاصه گفت‌وگو|خلاصه گفتگو)\s*[:\s]*(?:###|---)?\s*[\n]([\s\S]*)$", raw_text)
         if match_fa:
             summary = match_fa.group(1).strip()
             clean_answer = raw_text[:match_fa.start()].strip()
-            return clean_answer, summary
+            clean_answer = re.sub(r"دستورالعمل ثبت خلاصه[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            clean_answer = re.sub(r"توجه بسیار مهم[\s\S]*$", "", clean_answer, flags=re.IGNORECASE).strip()
+            try:
+                payload = TurnMemoryPayload(answer=clean_answer, summary=summary, has_explicit_summary=True)
+                return payload.answer, payload.summary
+            except Exception:
+                return clean_answer, summary
 
+        # 4. No tags found: return unmodified raw text and None
         return raw_text, None
 
     def synthesize(
@@ -406,13 +470,20 @@ class ResponseSynthesizer:
         full_prompt = f"System:\n{sys_prompt}\n\nUser:\n{user_message}"
 
         messages = [{"role": "system", "content": sys_prompt}]
-        if history:
+        has_history_in_chunks = any(
+            isinstance(c, dict) and (c.get("breadcrumb") == "گفتگوی پیشین" or c.get("doc_id") == "conversation_history")
+            for c in chunks
+        )
+        if history and not has_history_in_chunks:
             for turn in history[-4:]:
                 r = turn.get("role", "user")
                 c = turn.get("content", "")
                 if r in ("user", "assistant") and c:
                     messages.append({"role": r, "content": c})
         messages.append({"role": "user", "content": user_message})
+
+        self.last_context_block = context_block
+        self.last_full_prompt = "\n\n".join([f"[{m['role']}]:\n{m['content']}" for m in messages])
 
         # Attempt LLM call
         try:

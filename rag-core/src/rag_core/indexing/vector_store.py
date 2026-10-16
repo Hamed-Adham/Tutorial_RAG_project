@@ -19,6 +19,9 @@ from qdrant_client.models import (
 from rag_core.config import settings
 
 
+_SHARED_EMBEDDED_CLIENTS: Dict[str, QdrantClient] = {}
+
+
 def get_qdrant_client(
     path: Optional[str] = None,
     url: Optional[str] = None,
@@ -29,14 +32,20 @@ def get_qdrant_client(
     """
     Instantiate a QdrantClient.
     - If qdrant_mode == 'embedded' (default), directly open local disk storage (SQLite-like).
+      Reuses shared instance per local path to avoid file lock contention in the same process.
     - If qdrant_mode == 'server', connect via URL or host:port with fallback to embedded.
     """
     local_path = path or settings.qdrant_path
 
     # 1. Embedded SQLite-like mode (Zero Docker required)
     if settings.qdrant_mode == "embedded":
+        abs_path = str(Path(local_path).resolve())
+        if abs_path in _SHARED_EMBEDDED_CLIENTS:
+            return _SHARED_EMBEDDED_CLIENTS[abs_path]
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        return QdrantClient(path=local_path)
+        client = QdrantClient(path=local_path)
+        _SHARED_EMBEDDED_CLIENTS[abs_path] = client
+        return client
 
     # 2. Explicit URL
     target_url = url or settings.qdrant_url
@@ -54,8 +63,13 @@ def get_qdrant_client(
     except Exception:
         pass
 
+    abs_path = str(Path(local_path).resolve())
+    if abs_path in _SHARED_EMBEDDED_CLIENTS:
+        return _SHARED_EMBEDDED_CLIENTS[abs_path]
     Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-    return QdrantClient(path=local_path)
+    client = QdrantClient(path=local_path)
+    _SHARED_EMBEDDED_CLIENTS[abs_path] = client
+    return client
 
 
 class QdrantVectorStore:

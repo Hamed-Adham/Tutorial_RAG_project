@@ -138,3 +138,48 @@ def test_synthesizer_fallback_summary_when_tag_missing():
 
     assert isinstance(result, SynthesisResult)
     assert result.q_and_a_summary == "انرژی پتانسیل گرانشی به ارتفاع و جرم جسم بستگی دارد."
+
+
+def test_synthesizer_does_not_duplicate_history_when_history_chunks_present():
+    """
+    When chunks already contains conversation history (Decision Model 2 managed),
+    synthesizer must NOT append raw history turns into messages to prevent double injection.
+    """
+    synth = ResponseSynthesizer(base_url="http://localhost:20128/v1")
+
+    mock_client = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = "دهان اولین بخش لوله گوارش است."
+    mock_response = MagicMock()
+    mock_response.choices = [mock_choice]
+    mock_client.chat.completions.create.return_value = mock_response
+    synth._client = mock_client
+
+    history_chunk = {
+        "text": "خلاصه گفتگوی پیشین: بررسی دستگاه گوارش",
+        "page": 1,
+        "breadcrumb": "گفتگوی پیشین",
+        "doc_id": "conversation_history",
+        "chunk_id": "turn_1"
+    }
+
+    raw_history = [
+        {"role": "user", "content": "دستگاه گوارش چیست؟"},
+        {"role": "assistant", "content": "دستگاه گوارش شامل دهان و معده است."}
+    ]
+
+    synth.synthesize(
+        query="نقش بخش اول چیست؟",
+        chunks=[history_chunk],
+        history=raw_history
+    )
+
+    call_args = mock_client.chat.completions.create.call_args[1]
+    messages = call_args["messages"]
+
+    # Only system and the final user message should be in messages (no raw history duplicates)
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert "خلاصه گفتگوی پیشین: بررسی دستگاه گوارش" in messages[1]["content"]
+

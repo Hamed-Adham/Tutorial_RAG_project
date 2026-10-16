@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useRef, useEffect } from "react"
-import { Send, Square, Sparkles, BookOpen, Reply, X } from "lucide-react"
+import { Send, Square, Sparkles, BookOpen, Reply, X, HelpCircle } from "lucide-react"
 import { SelectedContextTurn } from "@/types"
 
 interface ChatInputProps {
@@ -11,17 +11,38 @@ interface ChatInputProps {
   isStreaming: boolean
   selectedChapters: number[]
   onOpenChapterModal: () => void
+  selectedCategories?: string[]
+  onOpenFAQModal?: () => void
+  onOpenScopeModal?: () => void
+  source?: "science_textbook" | "administrative_faq" | "all"
+  selectedSources?: string[]
   selectedContextTurn?: SelectedContextTurn | null
   onClearSelectedContext?: () => void
 }
 
-const QUICK_SUGGESTIONS = [
-    "مراحل اصلی حل مسئله به روش علمی چیست؟",
-    "فرمول محاسبه چگالی چیست و یکای آن چیست؟",
-    "تفاوت جرم و وزن چیست و با چه وسیله‌ای سنجیده می‌شود؟",
-    "آبخوان و سفره آب زیرزمینی چگونه تشکیل می‌شود؟",
-    "نقش میتوکندری در تولید انرژی یاخته چیست؟",
-    "تبادل گازها در شش‌ها چگونه صورت می‌گیرد؟"
+const SCIENCE_SUGGESTIONS = [
+  "مراحل اصلی حل مسئله به روش علمی چیست؟",
+  "فرمول محاسبه چگالی چیست و یکای آن چیست؟",
+  "تفاوت جرم و وزن چیست و با چه وسیله‌ای سنجیده می‌شود؟",
+  "آبخوان و سفره آب زیرزمینی چگونه تشکیل می‌شود؟",
+  "نقش میتوکندری در تولید انرژی یاخته چیست؟",
+  "تبادل گازها در شش‌ها چگونه صورت می‌گیرد؟"
+]
+
+const FAQ_SUGGESTIONS = [
+  "شرکت‌های غیردانش‌بنیان از چه خدماتی می‌توانند استفاده کنند؟",
+  "سقف میزان تسهیلات برای شرکت‌های دانش‌بنیان بر چه اساسی تعیین می‌شود؟",
+  "نحوه ثبت نام در سامانه غزال چگونه است؟",
+  "تسهیلات سرمایه در گردش به چه شرکت‌هایی تعلق می‌گیرد؟",
+  "ضمانت‌نامه‌های صادره توسط صندوق نوآوری چه انواعی دارند؟",
+  "خدمات لیزینگ و استصناع به چه صورت ارائه می‌شود؟"
+]
+
+const COMPOSITE_SUGGESTIONS = [
+  "چگالی چیست و آیا صندوق نوآوری به پروژه‌های اندازه‌گیری تسهیلات می‌دهد؟",
+  "شرایط دریافت ضمانت‌نامه شرکت‌های دانش‌بنیان فعال در حوزه انرژی‌های تجدیدپذیر چیست؟",
+  "مراحل حل مسئله به روش علمی چیست و برای ثبت اختراع چه حمایتی وجود دارد؟",
+  "آبخوان چیست و تسهیلات صندوق برای طرح‌های تصفیه آب چگونه است؟"
 ]
 
 export function ChatInput({
@@ -31,11 +52,28 @@ export function ChatInput({
   isStreaming,
   selectedChapters,
   onOpenChapterModal,
+  selectedCategories = [],
+  onOpenFAQModal,
+  onOpenScopeModal,
+  source = "science_textbook",
+  selectedSources,
   selectedContextTurn,
   onClearSelectedContext,
 }: ChatInputProps) {
   const [input, setInput] = useState("")
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const activeSources = selectedSources && selectedSources.length > 0
+    ? selectedSources
+    : source === "all"
+    ? ["science_textbook", "administrative_faq"]
+    : [source]
+
+  const isScienceActive = activeSources.includes("science_textbook")
+  const isFaqActive = activeSources.includes("administrative_faq")
+  const isAll = isScienceActive && isFaqActive
+  const isFAQ = !isScienceActive && isFaqActive
+  const suggestions = isAll ? COMPOSITE_SUGGESTIONS : isFAQ ? FAQ_SUGGESTIONS : SCIENCE_SUGGESTIONS
 
   // Auto-resize textarea height
   useEffect(() => {
@@ -71,7 +109,7 @@ export function ChatInput({
             <Sparkles className="w-3 h-3 text-amber-500" />
             <span>پیشنهادها:</span>
           </span>
-          {QUICK_SUGGESTIONS.map((sug, i) => (
+          {suggestions.map((sug, i) => (
             <button
               key={i}
               type="button"
@@ -113,20 +151,48 @@ export function ChatInput({
           onSubmit={handleSubmit}
           className="relative rounded-2xl border border-border/80 bg-card/90 shadow-lg focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/20 transition-all flex flex-col p-2"
         >
-          {/* Active Scope Tag above text */}
+          {/* Active Scope Tag above text synced with Source */}
           <div className="flex items-center justify-between px-2 pt-1 pb-1 text-[11px] text-muted-foreground border-b border-border/40 select-none">
-            <button
-              type="button"
-              onClick={onOpenChapterModal}
-              className="hover:text-primary transition-colors flex items-center gap-1 text-[11px] font-medium"
-            >
-              <BookOpen className="w-3 h-3 text-primary" />
-              <span>
-                {selectedChapters.length === 0
-                  ? "دامنه جستجو: کل ۱۵ فصل کتاب (حالت عمومی)"
-                  : `دامنه تمرین: فصل‌های ${selectedChapters.join("، ")}`}
-              </span>
-            </button>
+            {isAll ? (
+              <button
+                type="button"
+                onClick={onOpenScopeModal || onOpenChapterModal}
+                className="hover:text-primary transition-colors flex items-center gap-1.5 text-[11px] font-medium text-foreground truncate"
+                title="مدیریت دامنه و سرفصل‌های منابع فعال"
+              >
+                <span className="flex items-center gap-1 text-primary/90">
+                  <BookOpen className="w-3 h-3 text-primary" />
+                  <span>{selectedChapters.length === 0 ? "کل کتاب (۱۵ فصل)" : `${selectedChapters.length} فصل`}</span>
+                </span>
+                <span className="text-muted-foreground/50 font-bold">+</span>
+                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <HelpCircle className="w-3 h-3" />
+                  <span>پرسش‌های متداول (۱۳۴ مورد)</span>
+                </span>
+              </button>
+            ) : isFAQ ? (
+              <button
+                type="button"
+                onClick={onOpenScopeModal || onOpenFAQModal || onOpenChapterModal}
+                className="hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors flex items-center gap-1 text-[11px] font-medium text-emerald-600/90 dark:text-emerald-400/90"
+              >
+                <HelpCircle className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
+                <span>دامنه جستجو: کل بانک پرسش‌های متداول (۱۳۴ مورد)</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenScopeModal || onOpenChapterModal}
+                className="hover:text-primary transition-colors flex items-center gap-1 text-[11px] font-medium text-primary/90"
+              >
+                <BookOpen className="w-3 h-3 text-primary" />
+                <span>
+                  {selectedChapters.length === 0
+                    ? "دامنه جستجو: کل ۱۵ فصل کتاب (حالت عمومی)"
+                    : `دامنه تمرین: فصل‌های ${selectedChapters.join("، ")}`}
+                </span>
+              </button>
+            )}
             <span className="text-[10px] text-muted-foreground/80 hidden sm:inline">
               Enter برای ارسال • Shift+Enter برای خط جدید
             </span>
@@ -140,7 +206,13 @@ export function ChatInput({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="پرسش خود را درباره کتاب علوم تجربی هفتم بنویسید..."
+              placeholder={
+                isAll
+                  ? "پرسش خود را بنویسید (مسیریابی هوشمند در علوم تجربی هفتم یا پرسش‌های متداول صندوق نوآوری)..."
+                  : isFAQ
+                  ? "پرسش خود را درباره تسهیلات، ضمانت‌نامه‌ها، لیزینگ و فرآیندهای صندوق نوآوری بنویسید..."
+                  : "پرسش خود را درباره کتاب علوم تجربی هفتم بنویسید..."
+              }
               className="flex-1 bg-transparent border-0 focus:outline-none focus:ring-0 resize-none text-xs md:text-sm text-foreground placeholder:text-muted-foreground px-2 py-1 max-h-40 min-h-[40px] leading-relaxed"
               dir="rtl"
             />

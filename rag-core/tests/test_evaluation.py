@@ -32,7 +32,7 @@ class TestEvaluationFramework(unittest.TestCase):
         self.assertIsInstance(res, GateResult)
         self.assertTrue(res.gated)
         self.assertEqual(res.passed, 1)
-        self.assertLess(res.latency_seconds, 0.05)
+        self.assertLess(res.latency_ms, 50.0)
 
     def test_layer1_code_gate_content_passthrough(self):
         """Verify Layer 1 gate passes substantive answers through to Layer 2."""
@@ -50,7 +50,7 @@ class TestEvaluationFramework(unittest.TestCase):
         self.assertIsInstance(res, GateResult)
         # Content item is not gated deterministically, so gated is False (passes to LLM Judge)
         self.assertFalse(res.gated)
-        self.assertLess(res.latency_seconds, 0.05)
+        self.assertLess(res.latency_ms, 50.0)
 
     def test_kg_schema_dataclasses(self):
         """Verify KG schema dataclasses instantiate correctly."""

@@ -81,10 +81,12 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         self._session_is_refusal: Dict[str, bool] = {}
         self._session_effective_query: Dict[str, str] = {}
         self._session_latencies: Dict[str, Dict[str, float]] = {}
+        self._session_summaries: Dict[str, str] = {}
         self.last_citations: List[PageCitation] = []
         self.last_is_refusal: bool = False
         self.last_effective_query: str = ""
         self.last_latencies: Dict[str, float] = {}
+        self.last_summary: Optional[str] = None
 
         if warmup:
             self.warmup()
@@ -114,6 +116,16 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         if session_id and session_id in self._session_latencies:
             return dict(self._session_latencies[session_id])
         return dict(self.last_latencies)
+
+    def get_summary_for_session(self, session_id: Optional[str]) -> Optional[str]:
+        if session_id and session_id in getattr(self, "_session_summaries", {}):
+            return self._session_summaries[session_id]
+        return getattr(self, "last_summary", None)
+
+    def get_full_prompt_for_session(self, session_id: Optional[str]) -> Optional[str]:
+        if session_id and session_id in getattr(self, "_session_full_prompts", {}):
+            return self._session_full_prompts[session_id]
+        return getattr(self.synthesizer, "last_full_prompt", getattr(self, "last_full_prompt", None))
 
 
     def as_langgraph_pipeline(self):
@@ -361,7 +373,7 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         if self.tracker and self.tracker.is_active:
             try:
                 trace_id = self.tracker.trace_advanced_pipeline(
-                    name="advanced_science_rag_stream",
+                    name="advanced_pipeline",
                     question=query_text,
                     answer=accumulated_answer,
                     is_refusal=is_refusal,
@@ -523,7 +535,7 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
             if self.tracker and self.tracker.is_active:
                 try:
                     trace_id = self.tracker.trace_advanced_pipeline(
-                        name="advanced_science_rag",
+                        name="advanced_pipeline",
                         question=query_text,
                         answer=GROUNDED_REFUSAL_FA,
                         is_refusal=True,
@@ -683,7 +695,7 @@ class AdvancedRAGPipeline(IAdvancedRAGPipeline):
         if self.tracker and self.tracker.is_active:
             try:
                 trace_id = self.tracker.trace_advanced_pipeline(
-                    name="advanced_science_rag",
+                    name="advanced_pipeline",
                     question=query_text,
                     answer=final_answer,
                     is_refusal=is_refusal,

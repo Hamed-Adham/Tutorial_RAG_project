@@ -118,6 +118,7 @@ class Settings:
     qdrant_api_key: Optional[str] = os.getenv("QDRANT_API_KEY", None)
     qdrant_path: str = os.getenv("QDRANT_PATH", str(WORKSPACE_ROOT / "data_index" / "qdrant_db"))
     qdrant_collection_name: str = os.getenv("QDRANT_COLLECTION", "unified_rag_chunks")
+    naive_qdrant_collection_name: str = os.getenv("NAIVE_QDRANT_COLLECTION", "naive_baseline_chunks")
 
     # Knowledge Graph (Neo4j)
     neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")

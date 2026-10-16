@@ -174,7 +174,7 @@ class TestRetrievalAndSynthesis(unittest.TestCase):
         self.assertGreaterEqual(len(bundle.citations), 2)
         citation_str = bundle.inline_text
         self.assertIn("science_book.pdf", citation_str)
-        self.assertIn("page 12", citation_str)
+        self.assertTrue("صفحه 12" in citation_str or "page 12" in citation_str)
 
     def test_synthesizer_grounded_fallback(self):
         synthesizer = ResponseSynthesizer()

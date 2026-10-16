@@ -1,12 +1,38 @@
+export type SourceDomain = "science_textbook" | "administrative_faq"
+export type SelectedSourceMode = "science_textbook" | "administrative_faq" | "all"
+
 export interface Citation {
   doc_id: string
   filename: string
   page: number
+  book_page?: number
+  citation?: string
   chunk_id?: string
   score?: number
+  category?: string
+  row?: number
   metadata?: {
     title?: string
+    category?: string
+    row?: number
+    [key: string]: any
   }
+}
+
+export interface ChatRequestPayload {
+  query: string
+  session_id?: string
+  selected_chapters?: number[] | null
+  selected_sources?: string[] | null
+  selected_categories?: string[] | null
+  selected_faq_categories?: string[] | null
+  top_k?: number
+  stream?: boolean
+  history?: Array<{ role: string; content: string; turn_id?: string; summary?: string; q_and_a_summary?: string }>
+  selected_context_turn_id?: string
+  history_enabled?: boolean
+  pipeline_mode?: "advanced" | "naive"
+  source?: string
 }
 
 export interface LatencyProfile {
@@ -44,6 +70,7 @@ export interface Message {
   status_title?: string
   cost_1k?: Cost1kEstimate
   conversational_context_badge?: string
+  q_and_a_summary?: string
 }
 
 export interface SelectedContextTurn {
@@ -58,6 +85,8 @@ export interface Session {
   createdAt: string
   updatedAt: string
   selectedChapters?: number[]
+  selectedSources?: string[]
+  selectedFaqCategories?: string[]
 }
 
 export interface Chapter {

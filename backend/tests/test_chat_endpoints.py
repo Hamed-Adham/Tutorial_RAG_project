@@ -414,3 +414,222 @@ async def test_scenario_6_turn_0_cold_start_coercion(async_client: AsyncClient, 
     assert data["is_refusal"] is False
 
 
+@pytest.mark.asyncio
+async def test_naive_pipeline_mode_and_faq_routing(async_client: AsyncClient, monkeypatch):
+    """Test Chat endpoint with pipeline_mode='naive' and source='administrative_faq'."""
+    captured_req = []
+
+    async def mock_execute(req):
+        captured_req.append(req)
+        return ChatResponse(
+            session_id=req.session_id or "sess_naive_1",
+            query=req.query,
+            effective_query=req.query,
+            answer="شرکت‌های دانش‌بنیان می‌توانند از تسهیلات استفاده نمایند.",
+            citations=[
+                PageCitation(
+                    doc_id="faq_row_001",
+                    filename="faq_qa_pairs.csv",
+                    page=1,
+                    book_page=1,
+                    citation="پرسش‌های متداول | دسته: میز خدمت و پذیرش – ثبت نام",
+                    score=0.92
+                )
+            ],
+            conversational_context_badge="پایپ‌لاین پایه (Naive Baseline)",
+            intent_tier="administrative_faq"
+        )
+
+    monkeypatch.setattr(rag_service, "execute_chat", mock_execute)
+
+    resp = await async_client.post("/api/v1/chat", json={
+        "query": "نحوه ثبت نام در سامانه غزال چگونه است؟",
+        "pipeline_mode": "naive",
+        "source": "administrative_faq",
+        "selected_categories": ["میز خدمت و پذیرش"]
+    })
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(captured_req) == 1
+    assert captured_req[0].pipeline_mode == "naive"
+    assert captured_req[0].source == "administrative_faq"
+    assert captured_req[0].selected_categories == ["میز خدمت و پذیرش"]
+    assert data["citations"][0]["citation"] == "پرسش‌های متداول | دسته: میز خدمت و پذیرش – ثبت نام"
+
+
+@pytest.mark.asyncio
+async def test_trace_root_names_isolated_per_pipeline():
+    """Verify that rag_service uses 'naive_pipeline' for naive and 'advanced_pipeline' for advanced."""
+    from app.services.rag_service import RAGService
+    from app.schemas.chat import ChatRequest
+
+    mock_naive = MagicMock()
+    mock_naive.query.return_value = {
+        "answer": "پاسخ پایه",
+        "sources": [],
+        "retrieval_latency": 0.01,
+        "generation_latency": 0.1,
+        "trace_id": "naive_trace_123"
+    }
+    mock_naive.tracker = MagicMock()
+    mock_naive.tracker.is_active = True
+
+    mock_adv = MagicMock()
+    mock_adv.tracker = MagicMock()
+    mock_adv.tracker.is_active = True
+    mock_adv.tracker.trace_advanced_pipeline.return_value = "adv_trace_789"
+
+    mock_graph = MagicMock()
+    mock_graph.tracker = mock_adv.tracker
+    mock_graph.ainvoke = AsyncMock(return_value={
+        "agent_response": "پاسخ پیشرفته",
+        "citations": [],
+        "latencies": {},
+        "effective_query": "تست",
+        "trace_id": "adv_trace_789"
+    })
+
+    service = RAGService(
+        naive_pipeline=mock_naive,
+        enterprise_graph=mock_graph,
+        pipeline=mock_adv
+    )
+
+    # 1. Execute naive chat -> MUST route to naive_pipeline without calling trace_advanced_pipeline
+    naive_req = ChatRequest(query="پرسش", pipeline_mode="naive")
+    naive_resp = await service.execute_chat(naive_req)
+    assert naive_resp.trace_id == "naive_trace_123"
+    mock_naive.tracker.flush.assert_called_once()
+    mock_adv.tracker.trace_advanced_pipeline.assert_not_called()
+
+    # 2. Execute advanced chat -> MUST call trace_advanced_pipeline with name="advanced_pipeline"
+    adv_req = ChatRequest(query="پرسش پیشرفته", pipeline_mode="advanced")
+    adv_resp = await service.execute_chat(adv_req)
+    mock_adv.tracker.trace_advanced_pipeline.assert_called_once()
+    adv_call_kwargs = mock_adv.tracker.trace_advanced_pipeline.call_args.kwargs
+    assert adv_call_kwargs["name"] == "advanced_pipeline"
+    assert "pipeline:advanced" in adv_call_kwargs["tags"]
+
+
+@pytest.mark.asyncio
+async def test_batch_chat_endpoint_multisource(async_client: AsyncClient, monkeypatch):
+    """POST /api/v1/chat must accept selected_sources and selected_faq_categories."""
+    captured = []
+
+    async def mock_execute(req):
+        captured.append(req)
+        return ChatResponse(
+            session_id="sess_multi_01",
+            query=req.query,
+            effective_query=req.query,
+            answer="پاسخ ترکیبی از علوم و پرسش‌های متداول",
+            citations=[
+                PageCitation(
+                    doc_id="C706_olom_haftom-7-144-6-11.pdf",
+                    filename="کتاب علوم تجربی هفتم",
+                    page=4,
+                    chunk_id="SEC-0015_c0",
+                    score=0.92
+                ),
+                PageCitation(
+                    doc_id="administrative_faq",
+                    filename="پرسش‌های متداول صندوق",
+                    page=1,
+                    chunk_id="FAQ_ROW_0012",
+                    score=0.88,
+                    citation="[پرسش‌های متداول – دسته: ضمانت‌نامه – ردیف: ۱۲]"
+                )
+            ],
+            is_refusal=False,
+            latency_profile={"total_ms": 120.0},
+            trace_id="multi_trace_123"
+        )
+
+    monkeypatch.setattr(rag_service, "execute_chat", mock_execute)
+
+    payload = {
+        "query": "چگالی چیست و آیا ضمانت‌نامه برای آن صادر می‌شود؟",
+        "session_id": "sess_multi_01",
+        "pipeline_mode": "advanced",
+        "selected_sources": ["science_textbook", "administrative_faq"],
+        "selected_faq_categories": ["ضمانت‌نامه"],
+        "top_k": 5
+    }
+
+    resp = await async_client.post("/api/v1/chat", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert len(captured) == 1
+    assert captured[0].selected_sources == ["science_textbook", "administrative_faq"]
+    assert captured[0].selected_faq_categories == ["ضمانت‌نامه"]
+    assert len(data["citations"]) == 2
+    assert "ترکیبی" in data["answer"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_chat_endpoint_multisource(async_client: AsyncClient, monkeypatch):
+    """POST /api/v1/chat/stream must accept multi-source payloads and emit SSE stream."""
+    captured = []
+
+    async def mock_stream(req):
+        captured.append(req)
+        yield 'event: token\ndata: {"content": "پاسخ چندمنبعی", "seq": 1}\n\n'
+        yield 'event: done\ndata: {"session_id": "sess_multi_02", "turn_id": "turn_1", "effective_query": "تست"}\n\n'
+
+    monkeypatch.setattr(rag_service, "execute_chat_stream", mock_stream)
+
+    payload = {
+        "query": "پرسش چندمنبعی",
+        "session_id": "sess_multi_02",
+        "pipeline_mode": "advanced",
+        "selected_sources": ["science_textbook", "administrative_faq"],
+        "selected_faq_categories": ["تسهیلات"],
+        "stream": True
+    }
+
+    resp = await async_client.post("/api/v1/chat/stream", json=payload)
+    assert resp.status_code == 200
+    assert "text/event-stream" in resp.headers["content-type"]
+    assert len(captured) == 1
+    assert captured[0].selected_sources == ["science_textbook", "administrative_faq"]
+    assert captured[0].selected_faq_categories == ["تسهیلات"]
+
+
+@pytest.mark.asyncio
+async def test_rag_service_forwards_multisource_to_enterprise_graph():
+    """Verify RAGService forwards selected_sources & selected_faq_categories to EnterpriseScienceGraph."""
+    from app.services.rag_service import RAGService
+    from app.schemas.chat import ChatRequest
+
+    mock_graph = MagicMock()
+    mock_graph.tracker = None
+    mock_graph.ainvoke = AsyncMock(return_value={
+        "agent_response": "پاسخ ترکیبی",
+        "citations": [],
+        "latencies": {},
+        "effective_query": "تست",
+        "trace_id": "trace_multi"
+    })
+
+    service = RAGService(
+        naive_pipeline=MagicMock(),
+        enterprise_graph=mock_graph,
+        pipeline=MagicMock()
+    )
+
+    req = ChatRequest(
+        query="تست چندمنبعی",
+        selected_sources=["science_textbook", "administrative_faq"],
+        selected_faq_categories=["ضمانت‌نامه"],
+        pipeline_mode="advanced"
+    )
+
+    resp = await service.execute_chat(req)
+    assert resp.answer == "پاسخ ترکیبی"
+    mock_graph.ainvoke.assert_called_once()
+    call_kwargs = mock_graph.ainvoke.call_args.kwargs
+    assert call_kwargs["selected_sources"] == ["science_textbook", "administrative_faq"]
+    assert call_kwargs["selected_faq_categories"] == ["ضمانت‌نامه"]
+

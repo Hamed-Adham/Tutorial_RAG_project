@@ -22,9 +22,9 @@ interface SidebarProps {
   onSelectSession: (id: string) => void
   onNewSession: () => void
   onDeleteSession: (id: string) => void
-  onOpenChapterModal: () => void
+  onOpenChapterModal?: () => void
   onOpenEvaluationModal?: () => void
-  selectedChapters: number[]
+  selectedChapters?: number[]
   health: SystemHealth | null
   isOpen: boolean
   onToggleOpen: () => void
@@ -38,7 +38,7 @@ export function Sidebar({
   onDeleteSession,
   onOpenChapterModal,
   onOpenEvaluationModal,
-  selectedChapters,
+  selectedChapters = [],
   health,
   isOpen,
   onToggleOpen,
@@ -126,36 +126,6 @@ export function Sidebar({
           </button>
         </div>
       )}
-
-      {/* Chapter Scope Filter (Our unique project feature!) */}
-      <div className="p-3 border-b border-border/60">
-        <div className="text-[11px] font-semibold text-muted-foreground mb-1.5 uppercase tracking-wider">
-          دامنه یادگیری و تمرین
-        </div>
-        <button
-          onClick={onOpenChapterModal}
-          className="w-full flex items-center justify-between p-2.5 rounded-xl border border-border/80 bg-muted/40 hover:bg-muted/70 transition-colors text-right"
-        >
-          <div className="flex items-center gap-2.5 overflow-hidden">
-            <div className="w-8 h-8 rounded-lg bg-primary/15 text-primary flex items-center justify-center shrink-0">
-              <BookOpen className="w-4 h-4" />
-            </div>
-            <div className="truncate">
-              <div className="text-xs font-semibold">
-                {selectedChapters.length === 0
-                  ? "تمام ۱۵ فصل کتاب (جستجوی سراسری)"
-                  : `${selectedChapters.length} فصل انتخاب‌شده`}
-              </div>
-              <div className="text-[10px] text-muted-foreground truncate">
-                {selectedChapters.length === 0
-                  ? "تمرین باز در کل مفاهیم کتاب"
-                  : `فصل‌های: ${selectedChapters.join("، ")}`}
-              </div>
-            </div>
-          </div>
-          <ChevronLeft className="w-4 h-4 text-muted-foreground shrink-0" />
-        </button>
-      </div>
 
       {/* Sessions List */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">

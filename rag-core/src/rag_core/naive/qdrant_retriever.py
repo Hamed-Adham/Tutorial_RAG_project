@@ -14,7 +14,16 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+    MatchAny,
+    PayloadSchemaType
+)
 
 from rag_core.config import settings
 from rag_core.naive.chunker import Chunk
@@ -28,43 +37,10 @@ def create_qdrant_client(
     api_key: Optional[str] = None
 ) -> QdrantClient:
     """
-    Intelligently instantiate a QdrantClient.
-    Priority:
-    1. Embedded SQLite-like mode (Zero Docker required) if settings.qdrant_mode == "embedded"
-    2. Explicit URL (if provided or in settings.qdrant_url)
-    3. Live HTTP service check on host:port (if online in "server" mode)
-    4. Fall back to embedded local storage on disk
+    Intelligently instantiate a QdrantClient using the process-wide shared cache for embedded databases.
     """
-    local_path = path or settings.qdrant_path
-
-    # 1. Embedded SQLite-like mode (Zero Docker required)
-    if settings.qdrant_mode == "embedded":
-        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-        print(f"Using embedded local Qdrant database at: {local_path}")
-        return QdrantClient(path=local_path)
-
-    # 2. Explicit URL
-    target_url = url or settings.qdrant_url
-    if target_url:
-        print(f"Connecting to Qdrant at URL: {target_url}")
-        return QdrantClient(url=target_url, api_key=api_key or settings.qdrant_api_key)
-
-    # 3. Check if remote host:port is responsive
-    h = host or settings.qdrant_host
-    p = port or settings.qdrant_port
-    try:
-        check_url = f"http://{h}:{p}/healthz"
-        with urllib.request.urlopen(check_url, timeout=0.5) as resp:
-            if resp.status == 200:
-                print(f"Connecting to live Qdrant server at http://{h}:{p}")
-                return QdrantClient(host=h, port=p, api_key=api_key or settings.qdrant_api_key)
-    except Exception:
-        pass
-
-    # 4. Fall back to embedded local storage on disk
-    Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-    print(f"Using embedded local Qdrant database at: {local_path}")
-    return QdrantClient(path=local_path)
+    from rag_core.indexing.vector_store import get_qdrant_client
+    return get_qdrant_client(path=path, url=url, host=host, port=port, api_key=api_key)
 
 
 class QdrantRetriever:
@@ -80,8 +56,59 @@ class QdrantRetriever:
         path: Optional[str] = None
     ):
         self.embedder = embedder
-        self.collection_name = collection_name or settings.qdrant_collection_name
+        self.collection_name = collection_name or getattr(settings, "naive_qdrant_collection_name", "naive_baseline_chunks")
         self.client = client or create_qdrant_client(path=path)
+
+    def ensure_collection(self) -> bool:
+        """
+        Verify collection exists and has points. If not, auto-populates it from
+        precomputed naive_index.npz and naive_metadata.json instantly without re-embedding.
+        Returns True if the collection is ready for querying.
+        """
+        try:
+            if not self.client.collection_exists(self.collection_name):
+                vector_dim = getattr(self.embedder, "dimension", 1024)
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(size=vector_dim, distance=Distance.COSINE)
+                )
+                try:
+                    self.client.create_payload_index(collection_name=self.collection_name, field_name="source_type", field_schema=PayloadSchemaType.KEYWORD)
+                    self.client.create_payload_index(collection_name=self.collection_name, field_name="category", field_schema=PayloadSchemaType.KEYWORD)
+                    self.client.create_payload_index(collection_name=self.collection_name, field_name="chapter", field_schema=PayloadSchemaType.INTEGER)
+                except Exception:
+                    pass
+
+            info = self.client.get_collection(self.collection_name)
+            points_count = getattr(info, "points_count", None) or getattr(info, "vectors_count", 0) or 0
+            if points_count > 0:
+                return True
+
+            # Populate from precomputed embeddings cache
+            cache_npz = settings.workspace_root / "data_index" / "naive_index.npz"
+            cache_meta = settings.workspace_root / "data_index" / "naive_metadata.json"
+            if cache_npz.exists() and cache_meta.exists():
+                data = np.load(str(cache_npz))
+                embeddings = data["embeddings"]
+                with open(cache_meta, "r", encoding="utf-8") as f:
+                    records = json.load(f)
+
+                points: List[PointStruct] = []
+                for idx, (rec, vec) in enumerate(zip(records, embeddings)):
+                    vector_list = vec.tolist() if isinstance(vec, np.ndarray) else list(vec)
+                    points.append(PointStruct(id=idx, vector=vector_list, payload=rec))
+
+                batch_size = 100
+                for i in range(0, len(points), batch_size):
+                    batch = points[i : i + batch_size]
+                    self.client.upsert(collection_name=self.collection_name, points=batch)
+
+                print(f"Auto-populated Qdrant collection '{self.collection_name}' with {len(points)} points from precomputed cache.")
+                return True
+            return False
+        except Exception as e:
+            print(f"Warning: Failed to ensure Qdrant collection '{self.collection_name}': {e}")
+            return False
 
     def index_chunks(self, chunks: List[Chunk], force_reindex: bool = False):
         """
@@ -160,11 +187,12 @@ class QdrantRetriever:
         query: str,
         top_k: int = 3,
         filter_source_type: Optional[str] = None,
-        filter_chapters: Optional[List[int]] = None
+        filter_chapters: Optional[List[int]] = None,
+        filter_categories: Optional[List[str]] = None
     ) -> List[Tuple[Chunk, float]]:
         """
         Embed query and retrieve top_k most similar chunks from Qdrant with cosine similarity.
-        Supports native pre-filtering by source_type and chapter list.
+        Supports native pre-filtering by source_type, chapter list, and FAQ category list.
         """
         query_vec = self.embedder.embed_query(query)
         vector_list = query_vec.tolist() if isinstance(query_vec, np.ndarray) else list(query_vec)
@@ -184,6 +212,13 @@ class QdrantRetriever:
                     match=MatchAny(any=filter_chapters)
                 )
             )
+        if filter_categories:
+            must_conditions.append(
+                FieldCondition(
+                    key="category",
+                    match=MatchAny(any=filter_categories)
+                )
+            )
 
         query_filter = Filter(must=must_conditions) if must_conditions else None
 
@@ -199,7 +234,7 @@ class QdrantRetriever:
         for pt in response.points:
             p = pt.payload or {}
             meta = dict(p.get("metadata", {}) or {})
-            for k in ("breadcrumbs", "chapter", "page", "section_id", "token_count"):
+            for k in ("breadcrumbs", "chapter", "chapter_title", "page", "book_page", "citation", "gold_identifier", "category", "question", "answer", "section_id", "token_count"):
                 if k in p and k not in meta:
                     meta[k] = p[k]
             chunk = Chunk(

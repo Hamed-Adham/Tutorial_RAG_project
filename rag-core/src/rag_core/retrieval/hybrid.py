@@ -8,7 +8,7 @@ from typing import List, Optional, Any, Dict
 import structlog
 
 from rag_core.indexing.science_schema import RetrievalCandidate
-from rag_core.retrieval.bm25 import BM25Retriever
+from rag_core.retrieval.bm25 import BM25Retriever, MultiCorpusBM25Retriever
 from rag_core.fusion.rrf import ReciprocalRankFusion
 
 logger = structlog.get_logger(__name__)
@@ -20,11 +20,11 @@ class HybridRetriever:
     def __init__(
         self,
         dense_retriever: Any = None,
-        bm25_retriever: Optional[BM25Retriever] = None,
+        bm25_retriever: Optional[Any] = None,
         fusion: Optional[ReciprocalRankFusion] = None
     ):
         self.dense_retriever = dense_retriever
-        self.bm25_retriever = bm25_retriever or BM25Retriever()
+        self.bm25_retriever = bm25_retriever or MultiCorpusBM25Retriever()
         self.fusion = fusion or ReciprocalRankFusion(k=60)
 
     def warmup(self) -> None:
@@ -33,12 +33,26 @@ class HybridRetriever:
         if dense is not None and hasattr(dense, "embedder") and hasattr(dense.embedder, "warmup"):
             dense.embedder.warmup()
 
-    async def _search_bm25(self, query: str, top_k: int, chapters: Optional[List[int]] = None) -> List[RetrievalCandidate]:
-        """Run BM25 search in executor to keep event loop unblocked with native chapter pre-filtering."""
+    async def _search_bm25(
+        self,
+        query: str,
+        top_k: int,
+        chapters: Optional[List[int]] = None,
+        source_domain: Optional[str] = "science_textbook",
+        categories: Optional[List[str]] = None
+    ) -> List[RetrievalCandidate]:
+        """Run BM25 search in executor to keep event loop unblocked with native chapter/category pre-filtering."""
         loop = asyncio.get_running_loop()
         bm25_kwargs: Dict[str, Any] = {"top_k": top_k}
         if chapters is not None:
             bm25_kwargs["chapters"] = chapters
+        if categories is not None:
+            bm25_kwargs["categories"] = categories
+        if hasattr(self.bm25_retriever, "search"):
+            import inspect
+            sig = inspect.signature(self.bm25_retriever.search)
+            if "source_domain" in sig.parameters:
+                bm25_kwargs["source_domain"] = source_domain or "science_textbook"
         return await loop.run_in_executor(None, lambda: self.bm25_retriever.search(query, **bm25_kwargs))
 
     def _resolve_dense_retriever(self) -> Any:
@@ -132,7 +146,14 @@ class HybridRetriever:
 
         return candidates
 
-    async def _search_dense(self, query: str, top_k: int, chapters: Optional[List[int]] = None) -> List[RetrievalCandidate]:
+    async def _search_dense(
+        self,
+        query: str,
+        top_k: int,
+        chapters: Optional[List[int]] = None,
+        source_domain: Optional[str] = None,
+        categories: Optional[List[str]] = None,
+    ) -> List[RetrievalCandidate]:
         """Run dense search asynchronously if supported, or wrapped in executor with native chapter pre-filtering."""
         retriever = self._resolve_dense_retriever()
         if retriever is None:
@@ -142,6 +163,10 @@ class HybridRetriever:
         dense_kwargs: Dict[str, Any] = {"top_k": top_k}
         if chapters is not None:
             dense_kwargs["filter_chapters"] = chapters
+        if source_domain is not None:
+            dense_kwargs["filter_source_type"] = source_domain
+        if categories is not None:
+            dense_kwargs["filter_categories"] = categories
 
         try:
             if hasattr(retriever, "retrieve"):
@@ -167,16 +192,22 @@ class HybridRetriever:
         query: str,
         top_k: int = 50,
         overfetch_k: int = 50,
-        chapters: Optional[List[int]] = None
+        chapters: Optional[List[int]] = None,
+        source_domain: Optional[str] = None,
+        categories: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Execute dense and BM25 searches in parallel with native chapter pre-filtering and fuse with RRF."""
+        """Execute dense and BM25 searches in parallel with native chapter/category pre-filtering and fuse with RRF."""
         if not query or not query.strip():
             return {"fused": [], "dense": [], "bm25": []}
 
         # Overfetch candidate pool before rank fusion
         candidate_k = max(overfetch_k, top_k)
-        dense_task = asyncio.create_task(self._search_dense(query, top_k=candidate_k, chapters=chapters))
-        bm25_task = asyncio.create_task(self._search_bm25(query, top_k=candidate_k, chapters=chapters))
+        dense_task = asyncio.create_task(self._search_dense(
+            query, top_k=candidate_k, chapters=chapters, source_domain=source_domain, categories=categories
+        ))
+        bm25_task = asyncio.create_task(self._search_bm25(
+            query, top_k=candidate_k, chapters=chapters, source_domain=source_domain, categories=categories
+        ))
 
         dense_results, bm25_results = [], []
 
@@ -214,14 +245,18 @@ class HybridRetriever:
         query: str,
         top_k: int = 50,
         overfetch_k: int = 50,
-        chapters: Optional[List[int]] = None
+        chapters: Optional[List[int]] = None,
+        source_domain: Optional[str] = None,
+        categories: Optional[List[str]] = None,
     ) -> List[RetrievalCandidate]:
-        """Execute dense and BM25 searches in parallel with native chapter pre-filtering and fuse with RRF."""
+        """Execute dense and BM25 searches in parallel with native chapter/category pre-filtering and fuse with RRF."""
         details = await self.retrieve_with_details(
             query=query,
             top_k=top_k,
             overfetch_k=overfetch_k,
-            chapters=chapters
+            chapters=chapters,
+            source_domain=source_domain,
+            categories=categories,
         )
         return details["fused"]
 

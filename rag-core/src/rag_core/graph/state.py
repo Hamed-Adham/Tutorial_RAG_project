@@ -20,6 +20,11 @@ class RAGGraphState(TypedDict, total=False):
     session_id: Optional[str]                # Conversation session identifier
     history: Optional[List[Dict[str, str]]]  # Multi-turn conversation turns
     selected_chapters: Optional[List[int]]   # Mode 1 active chapter filter [1..15]
+    selected_sources: Optional[List[str]]    # Explicit source selection (["science_textbook"], ["administrative_faq"], or ["all"])
+    selected_faq_categories: Optional[List[str]] # Pre-filtered FAQ categories
+    active_sources: Optional[List[str]]      # Active sources determined by L0 router or bypass
+    level0_decision: Optional[Dict[str, Any]] # Serialized Level0RoutingDecision
+    faq_dm1_decision: Optional[Dict[str, Any]] # FAQ DM1 decision metadata
 
     # Pre-Retrieval / Routing & Guardrail
     target_domain: str                       # Classified corpus ("science_textbook", "administrative_faq", "out_of_scope")

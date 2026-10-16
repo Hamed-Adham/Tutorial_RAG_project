@@ -9,7 +9,8 @@ import { ChatInput } from "@/components/ChatInput"
 import { ChapterModal } from "@/components/ChapterModal"
 import { MetricsModal } from "@/components/MetricsModal"
 import { EvaluationModal } from "@/components/EvaluationModal"
-import { Bot, Sparkles, BookOpen } from "lucide-react"
+import { FAQCategoryModal } from "@/components/FAQCategoryModal"
+import { Bot, Sparkles, BookOpen, HelpCircle } from "lucide-react"
 
 export default function ChatPage() {
   // Session State
@@ -17,6 +18,21 @@ export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string>("")
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const [selectedChapters, setSelectedChapters] = useState<number[]>([])
+
+  // Knowledge Source & Pipeline Mode State
+  const [selectedSources, setSelectedSources] = useState<string[]>(["science_textbook"])
+  const [pipelineMode, setPipelineMode] = useState<"advanced" | "naive">("advanced")
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([])
+
+  const isAll = selectedSources.includes("science_textbook") && selectedSources.includes("administrative_faq")
+  const isScienceActive = selectedSources.includes("science_textbook")
+  const isFaqActive = selectedSources.includes("administrative_faq")
+  const isFAQ = !isScienceActive && isFaqActive
+  const source: "science_textbook" | "administrative_faq" | "all" = isAll
+    ? "all"
+    : isFaqActive
+    ? "administrative_faq"
+    : "science_textbook"
 
   // Conversational History & Context Selection State (User Story 6)
   const [historyEnabled, setHistoryEnabled] = useState<boolean>(true)
@@ -33,6 +49,7 @@ export default function ChatPage() {
   // Modals & Panels
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true)
   const [chapterModalOpen, setChapterModalOpen] = useState<boolean>(false)
+  const [faqModalOpen, setFaqModalOpen] = useState<boolean>(false)
   const [metricsModalOpen, setMetricsModalOpen] = useState<boolean>(false)
   const [evaluationModalOpen, setEvaluationModalOpen] = useState<boolean>(false)
 
@@ -62,15 +79,82 @@ export default function ChatPage() {
           if (savedMsgs) {
             setMessages(JSON.parse(savedMsgs))
           }
-          return
         }
       } catch (e) {
         console.error("Failed to parse saved sessions", e)
       }
+    } else {
+      createNewSession()
     }
-    // Create initial default session
-    createNewSession()
+
+    // Restore pipeline mode and source preferences
+    const savedMode = localStorage.getItem("unified_rag_pipeline_mode") as "advanced" | "naive" | null
+    if (savedMode && (savedMode === "advanced" || savedMode === "naive")) {
+      setPipelineMode(savedMode)
+    }
+    const savedSources = localStorage.getItem("unified_rag_sources")
+    if (savedSources) {
+      try {
+        const parsed = JSON.parse(savedSources)
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setSelectedSources(parsed)
+        }
+      } catch (e) {
+        // fallback
+      }
+    } else {
+      const savedSource = localStorage.getItem("unified_rag_source") as "science_textbook" | "administrative_faq" | "all" | null
+      if (savedSource === "administrative_faq") {
+        setSelectedSources(["administrative_faq"])
+      } else if (savedSource === "all") {
+        setSelectedSources(["science_textbook", "administrative_faq"])
+      }
+    }
   }, [])
+
+  const handlePipelineModeChange = (mode: "advanced" | "naive") => {
+    setPipelineMode(mode)
+    localStorage.setItem("unified_rag_pipeline_mode", mode)
+    if (mode === "naive" && selectedSources.length > 1) {
+      // In Naive mode, restrict to single source
+      const single = [selectedSources[0]]
+      setSelectedSources(single)
+      localStorage.setItem("unified_rag_sources", JSON.stringify(single))
+    }
+  }
+
+  const handleToggleSource = (src: "science_textbook" | "administrative_faq") => {
+    if (pipelineMode === "advanced") {
+      let nextSources: string[]
+      if (selectedSources.includes(src)) {
+        if (selectedSources.length > 1) {
+          nextSources = selectedSources.filter((s) => s !== src)
+        } else {
+          // Cannot deselect the only active source
+          return
+        }
+      } else {
+        nextSources = [...selectedSources, src]
+      }
+      setSelectedSources(nextSources)
+      localStorage.setItem("unified_rag_sources", JSON.stringify(nextSources))
+    } else {
+      const nextSources = [src]
+      setSelectedSources(nextSources)
+      localStorage.setItem("unified_rag_sources", JSON.stringify(nextSources))
+    }
+  }
+
+  const handleSourceChange = (newSource: "science_textbook" | "administrative_faq" | "all") => {
+    let nextSources: string[]
+    if (newSource === "all") {
+      nextSources = ["science_textbook", "administrative_faq"]
+    } else {
+      nextSources = [newSource]
+    }
+    setSelectedSources(nextSources)
+    localStorage.setItem("unified_rag_sources", JSON.stringify(nextSources))
+  }
 
   // Persist sessions and messages
   useEffect(() => {
@@ -101,6 +185,14 @@ export default function ChatPage() {
   }, [])
 
   const createNewSession = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+    setIsLoading(false)
+    setIsStreamingActive(false)
+    setPipelineStepTitle(null)
+
     const newId = `sess_${Date.now().toString(36)}`
     const newSess: Session = {
       id: newId,
@@ -112,6 +204,21 @@ export default function ChatPage() {
     setSessions((prev) => [newSess, ...prev])
     setActiveSessionId(newId)
     setSelectedChapters([])
+    setSelectedContextTurn(null)
+  }
+
+  const handleSelectSession = (id: string) => {
+    if (id !== activeSessionId) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+        abortControllerRef.current = null
+      }
+      setIsLoading(false)
+      setIsStreamingActive(false)
+      setPipelineStepTitle(null)
+      setActiveSessionId(id)
+      setSelectedContextTurn(null)
+    }
   }
 
   const handleDeleteSession = async (id: string) => {
@@ -190,18 +297,27 @@ export default function ChatPage() {
       ? (messages[activeSessionId] || [])
           .filter((m) => m.content && m.content.trim().length > 0)
           .slice(-4)
-          .map((m) => ({ role: m.role, content: m.content }))
+          .map((m) => ({
+            role: m.role,
+            content: m.content,
+            turn_id: m.turn_id,
+            q_and_a_summary: m.q_and_a_summary,
+            summary: m.q_and_a_summary,
+          }))
       : []
 
     const payload = {
       query: queryText,
       session_id: activeSessionId,
-      selected_chapters: selectedChapters.length > 0 ? selectedChapters : null,
+      pipeline_mode: pipelineMode,
+      source: selectedSources[0],
+      selected_sources: selectedSources,
+      selected_chapters: selectedSources.includes("science_textbook") && selectedChapters.length > 0 ? selectedChapters : null,
       top_k: topK,
       stream: isStreaming,
-      history: priorTurns.length > 0 ? priorTurns : undefined,
-      history_enabled: historyEnabled,
-      selected_context_turn_id: selectedContextTurn?.id || undefined,
+      history: pipelineMode === "advanced" && historyEnabled ? priorTurns : undefined,
+      history_enabled: pipelineMode === "advanced" ? historyEnabled : false,
+      selected_context_turn_id: pipelineMode === "advanced" ? (selectedContextTurn?.id || undefined) : undefined,
     }
 
     // Reset selected context turn after dispatching request
@@ -240,6 +356,7 @@ export default function ChatPage() {
         let finalTraceId: string | undefined = undefined
         let finalTurnId: string | undefined = undefined
         let finalQueryRewritten = false
+        let finalSummary: string | undefined = undefined
 
         while (true) {
           const { done, value } = await reader.read()
@@ -301,6 +418,9 @@ export default function ChatPage() {
                 if (parsed.conversational_context_badge) {
                   finalConversationalBadge = parsed.conversational_context_badge
                 }
+                if (parsed.q_and_a_summary || parsed.summary) {
+                  finalSummary = parsed.q_and_a_summary || parsed.summary
+                }
                 if (parsed.latency_profile) {
                   finalProfile = {
                     ...parsed.latency_profile,
@@ -344,6 +464,7 @@ export default function ChatPage() {
                   cost_1k: finalCost1k,
                   trace_id: finalTraceId,
                   turn_id: finalTurnId,
+                  q_and_a_summary: finalSummary,
                 }
               }
               if (m.id === userMsgId && finalTurnId) {
@@ -412,6 +533,7 @@ export default function ChatPage() {
                   trace_id: data.trace_id,
                   cost_1k: data.cost_1k,
                   turn_id: data.turn_id,
+                  q_and_a_summary: data.q_and_a_summary,
                 }
               }
               if (m.id === userMsgId && data.turn_id) {
@@ -468,12 +590,10 @@ export default function ChatPage() {
       <Sidebar
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={setActiveSessionId}
+        onSelectSession={handleSelectSession}
         onNewSession={createNewSession}
         onDeleteSession={handleDeleteSession}
-        onOpenChapterModal={() => setChapterModalOpen(true)}
         onOpenEvaluationModal={() => setEvaluationModalOpen(true)}
-        selectedChapters={selectedChapters}
         health={health}
         isOpen={sidebarOpen}
         onToggleOpen={() => setSidebarOpen(!sidebarOpen)}
@@ -485,9 +605,10 @@ export default function ChatPage() {
         <ChatHeader
           session={activeSession}
           selectedChapters={selectedChapters}
+          selectedCategories={selectedCategories}
           onOpenChapterModal={() => setChapterModalOpen(true)}
+          onOpenScopeModal={() => setChapterModalOpen(true)}
           onOpenMetricsModal={() => setMetricsModalOpen(true)}
-          onOpenEvaluationModal={() => setEvaluationModalOpen(true)}
           onClearSession={handleClearCurrentSession}
           isStreaming={isStreaming}
           onToggleStreaming={() => setIsStreaming(!isStreaming)}
@@ -496,6 +617,12 @@ export default function ChatPage() {
           health={health}
           historyEnabled={historyEnabled}
           onToggleHistory={() => setHistoryEnabled(!historyEnabled)}
+          pipelineMode={pipelineMode}
+          onChangePipelineMode={handlePipelineModeChange}
+          source={source}
+          selectedSources={selectedSources}
+          onToggleSource={handleToggleSource}
+          onChangeSource={handleSourceChange}
         />
 
         {/* Message Scroll Container */}
@@ -503,29 +630,59 @@ export default function ChatPage() {
           {currentMessages.length === 0 ? (
             /* Empty State Hero */
             <div className="h-full flex flex-col items-center justify-center p-6 text-center max-w-xl mx-auto space-y-4">
-              <div className="w-14 h-14 rounded-2xl bg-primary/10 text-primary flex items-center justify-center shadow-lg border border-primary/20">
-                <Bot className="w-7 h-7" />
+              <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg border ${
+                isAll
+                  ? "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20"
+                  : isFAQ
+                  ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                  : "bg-primary/10 text-primary border-primary/20"
+              }`}>
+                {isAll ? <Sparkles className="w-7 h-7" /> : isFAQ ? <HelpCircle className="w-7 h-7" /> : <Bot className="w-7 h-7" />}
               </div>
               <div className="space-y-1.5">
                 <h1 className="text-lg md:text-xl font-bold tracking-tight">
-                  دستیار هوشمند علوم تجربی پایه هفتم
+                  {isAll
+                    ? "سامانه جامع چندمنبعی (کتاب علوم + پرسش‌های متداول)"
+                    : isFAQ
+                    ? "سامانه پاسخگویی به پرسش‌های متداول (صندوق نوآوری و شکوفایی)"
+                    : "دستیار هوشمند علوم تجربی پایه هفتم"}
                 </h1>
                 <p className="text-xs md:text-sm text-muted-foreground leading-relaxed">
-                  پاسخگویی به سوالات، تحلیل آزمایش‌ها، و بررسی مفاهیم علمی ۱۵ فصل کتاب درسی با استناد دقیق به شماره صفحات
+                  {isAll
+                    ? "مسیریابی هوشمند پرسش و استخراج متنی و معنایی همزمان از سرفصل‌های علوم تجربی هفتم و ضوابط صندوق نوآوری"
+                    : isFAQ
+                    ? "پاسخ به سوالات ضوابط، تسهیلات، ضمانت‌نامه‌ها، لیزینگ، صکوک و فرآیندهای پذیرش با دسترسی به ۱۳۴ پرسش متداول رسمی"
+                    : "پاسخگویی به سوالات، تحلیل آزمایش‌ها، و بررسی مفاهیم علمی ۱۵ فصل کتاب درسی با استناد دقیق به شماره صفحات"}
                 </p>
               </div>
 
               {/* Mode Badge Indicator */}
               <button
                 onClick={() => setChapterModalOpen(true)}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-muted/40 hover:bg-muted text-xs text-muted-foreground hover:text-foreground transition-all shadow-sm"
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-border bg-muted/40 hover:bg-muted text-xs text-muted-foreground hover:text-foreground transition-all shadow-xs"
               >
-                <BookOpen className="w-3.5 h-3.5 text-primary" />
-                <span>
-                  {selectedChapters.length === 0
-                    ? "دامنه جستجو: تمام ۱۵ فصل کتاب"
-                    : `دامنه تمرین: فصل‌های ${selectedChapters.join("، ")}`}
-                </span>
+                {isAll ? (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5 text-primary" />
+                    <span>
+                      دامنه: ۲ منبع فعال ({selectedChapters.length === 0 ? "کل ۱۵ فصل کتاب" : `${selectedChapters.length} فصل`} + ۱۳۴ پرسش متداول)
+                    </span>
+                  </>
+                ) : isFAQ ? (
+                  <>
+                    <HelpCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span>دامنه جستجو: کل بانک پرسش‌های متداول (۱۳۴ پرسش)</span>
+                  </>
+                ) : (
+                  <>
+                    <BookOpen className="w-3.5 h-3.5 text-primary" />
+                    <span>
+                      {selectedChapters.length === 0
+                        ? "دامنه جستجو: تمام ۱۵ فصل کتاب"
+                        : `دامنه تمرین: فصل‌های ${selectedChapters.join("، ")}`}
+                    </span>
+                  </>
+                )}
               </button>
             </div>
           ) : (
@@ -555,19 +712,33 @@ export default function ChatPage() {
           onStopStreaming={handleStopStreaming}
           isLoading={isLoading}
           isStreaming={isStreamingActive}
+          source={source}
+          selectedSources={selectedSources}
           selectedChapters={selectedChapters}
           onOpenChapterModal={() => setChapterModalOpen(true)}
+          onOpenScopeModal={() => setChapterModalOpen(true)}
           selectedContextTurn={selectedContextTurn}
           onClearSelectedContext={() => setSelectedContextTurn(null)}
         />
       </main>
 
-      {/* Chapter Selection Modal */}
+      {/* Scope & Chapter Selection Modal */}
       <ChapterModal
         isOpen={chapterModalOpen}
         onClose={() => setChapterModalOpen(false)}
         selectedChapters={selectedChapters}
         onSaveChapters={setSelectedChapters}
+        selectedSources={selectedSources}
+        onToggleSource={handleToggleSource}
+        pipelineMode={pipelineMode}
+      />
+
+      {/* FAQ Category Selection Modal */}
+      <FAQCategoryModal
+        isOpen={faqModalOpen}
+        onClose={() => setFaqModalOpen(false)}
+        selectedCategories={selectedCategories}
+        onSaveCategories={setSelectedCategories}
       />
 
       {/* Production Telemetry & Metrics Modal */}

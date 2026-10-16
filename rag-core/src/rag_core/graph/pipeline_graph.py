@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional, AsyncIterator
 from langgraph.graph import StateGraph, END
 
 from rag_core.graph.state import RAGGraphState
+from rag_core.indexing.science_schema import format_history_turn_for_context
 from rag_core.graph.nodes import (
     create_guard_and_route_node,
     refusal_node,
@@ -181,6 +182,13 @@ class LangGraphRAGPipeline:
 # Enterprise Science LangGraph StateGraph Pipeline
 # ---------------------------------------------------------------------------
 
+def should_level0_refuse(state: RAGGraphState) -> str:
+    """Conditional edge determining whether Level-0 routing rejected the query."""
+    if state.get("is_refusal", False) or state.get("is_adversarial", False):
+        return "refusal"
+    return "gated_rewrite"
+
+
 def should_enterprise_refuse(state: RAGGraphState) -> str:
     """Conditional edge determining whether query was halted by the pre-retrieval gate or routes directly to synthesis."""
     if state.get("is_refusal", False) or not state.get("proceed_to_retrieval", True):
@@ -206,11 +214,13 @@ class EnterpriseScienceGraph:
         expander: Optional[Any] = None,
         reorderer: Optional[Any] = None,
         synthesizer: Optional[Any] = None,
+        level0_router: Optional[Any] = None,
         top_k: int = 5,
         overfetch_k: int = 50,
         warmup: bool = False
     ):
         from rag_core.graph.nodes import (
+            create_level0_source_router_node,
             create_enterprise_gated_rewrite_node,
             create_enterprise_refusal_node,
             create_enterprise_hybrid_retrieve_node,
@@ -228,6 +238,7 @@ class EnterpriseScienceGraph:
         self.expander = expander
         self.reorderer = reorderer
         self.synthesizer = synthesizer
+        self.level0_router = level0_router
 
         self.last_citations: List[Any] = []
         self.last_is_refusal: bool = False
@@ -239,11 +250,14 @@ class EnterpriseScienceGraph:
         self._session_latencies: Dict[str, Dict[str, float]] = {}
         self.last_summary: Optional[str] = None
         self._session_summaries: Dict[str, Optional[str]] = {}
+        self.last_full_prompt: Optional[str] = None
+        self._session_full_prompts: Dict[str, Optional[str]] = {}
 
         # Build declarative StateGraph
         workflow = StateGraph(RAGGraphState)
 
         # Register nodes
+        workflow.add_node("level0_router", create_level0_source_router_node(level0_router))
         workflow.add_node("gated_rewrite", create_enterprise_gated_rewrite_node(rewriter))
         workflow.add_node("refusal", create_enterprise_refusal_node())
         workflow.add_node("hybrid_retrieve", create_enterprise_hybrid_retrieve_node(hybrid_retriever, overfetch_k=overfetch_k))
@@ -252,7 +266,12 @@ class EnterpriseScienceGraph:
         workflow.add_node("synthesis", create_enterprise_synthesis_node(synthesizer))
 
         # Define graph edges
-        workflow.set_entry_point("gated_rewrite")
+        workflow.set_entry_point("level0_router")
+        workflow.add_conditional_edges(
+            "level0_router",
+            should_level0_refuse,
+            {"refusal": "refusal", "gated_rewrite": "gated_rewrite"}
+        )
         workflow.add_conditional_edges(
             "gated_rewrite",
             should_enterprise_refuse,
@@ -273,6 +292,13 @@ class EnterpriseScienceGraph:
                     reranker.warmup()
             except Exception:
                 pass
+
+    def _resolve_level0_router(self) -> Any:
+        if self.level0_router is not None:
+            return self.level0_router
+        from rag_core.query.jev_router import Level0SourceRouter
+        self.level0_router = Level0SourceRouter()
+        return self.level0_router
 
     def _resolve_synthesizer(self) -> Any:
         if self.synthesizer is not None:
@@ -341,12 +367,19 @@ class EnterpriseScienceGraph:
             return self._session_summaries[session_id]
         return self.last_summary
 
+    def get_full_prompt_for_session(self, session_id: Optional[str]) -> Optional[str]:
+        if session_id and session_id in self._session_full_prompts:
+            return self._session_full_prompts[session_id]
+        return self.last_full_prompt
+
     async def ainvoke(
         self,
         query: str,
         session_id: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
         selected_chapters: Optional[List[int]] = None,
+        selected_sources: Optional[List[str]] = None,
+        selected_faq_categories: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None
     ) -> RAGGraphState:
         """Execute query asynchronously through the compiled LangGraph StateGraph."""
@@ -355,6 +388,8 @@ class EnterpriseScienceGraph:
             "session_id": session_id,
             "history": history,
             "selected_chapters": selected_chapters,
+            "selected_sources": selected_sources or (config or {}).get("selected_sources"),
+            "selected_faq_categories": selected_faq_categories or (config or {}).get("selected_faq_categories"),
             "selected_context_turn_id": (config or {}).get("selected_context_turn_id"),
             "metadata": {
                 "history_enabled": (config or {}).get("history_enabled", True)
@@ -373,11 +408,13 @@ class EnterpriseScienceGraph:
         self.last_citations = final_state.get("citations", [])
         self.last_is_refusal = final_state.get("is_refusal", False)
         self.last_effective_query = final_state.get("effective_query", query)
+        self.last_summary = final_state.get("q_and_a_summary")
         if session_id:
             self._session_citations[session_id] = self.last_citations
             self._session_is_refusal[session_id] = self.last_is_refusal
             self._session_effective_query[session_id] = self.last_effective_query
             self._session_latencies[session_id] = final_state.get("latencies", {})
+            self._session_summaries[session_id] = self.last_summary
 
         return final_state
 
@@ -387,6 +424,8 @@ class EnterpriseScienceGraph:
         session_id: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
         selected_chapters: Optional[List[int]] = None,
+        selected_sources: Optional[List[str]] = None,
+        selected_faq_categories: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None
     ) -> RAGGraphState:
         """Synchronously execute query through the compiled LangGraph StateGraph."""
@@ -395,7 +434,15 @@ class EnterpriseScienceGraph:
         if loop.is_running():
             import nest_asyncio
             nest_asyncio.apply()
-        return asyncio.run(self.ainvoke(query, session_id, history, selected_chapters, config))
+        return asyncio.run(self.ainvoke(
+            query=query,
+            session_id=session_id,
+            history=history,
+            selected_chapters=selected_chapters,
+            selected_sources=selected_sources,
+            selected_faq_categories=selected_faq_categories,
+            config=config
+        ))
 
     async def astream_tokens(
         self,
@@ -403,6 +450,8 @@ class EnterpriseScienceGraph:
         session_id: Optional[str] = None,
         history: Optional[List[Dict[str, str]]] = None,
         selected_chapters: Optional[List[int]] = None,
+        selected_sources: Optional[List[str]] = None,
+        selected_faq_categories: Optional[List[str]] = None,
         config: Optional[Dict[str, Any]] = None,
         status_callback: Optional[Any] = None,
     ) -> AsyncIterator[str]:
@@ -429,6 +478,22 @@ class EnterpriseScienceGraph:
                 except Exception:
                     pass
 
+        # 0. Level-0 Source Routing / Multi-Source Evaluation
+        level0 = self._resolve_level0_router()
+        effective_sources = selected_sources or (config or {}).get("selected_sources")
+        l0_decision = level0.route_query(
+            query=query,
+            enabled_sources=effective_sources,
+            history=history
+        )
+        latencies["level0_router_ms"] = l0_decision.latencies.get("router_ms", 0.0)
+        if l0_decision.is_refusal:
+            self.last_is_refusal = True
+            if session_id:
+                self._session_is_refusal[session_id] = True
+            yield GROUNDED_REFUSAL_FA
+            return
+
         # 1. Gated Rewriting / Intent Guard
         await _notify("rewrite", "تحلیل و بررسی سوال")
         t0 = time.perf_counter()
@@ -447,13 +512,66 @@ class EnterpriseScienceGraph:
                 use_route = True
 
         hist_enabled = (config or {}).get("history_enabled", True)
-        if use_route:
+        active_sources = l0_decision.active_sources or ["science_textbook"]
+        is_both = "science_textbook" in active_sources and "administrative_faq" in active_sources
+        is_faq_only = "administrative_faq" in active_sources and "science_textbook" not in active_sources
+
+        if use_route and is_both:
             selected_turn_id = (config or {}).get("selected_context_turn_id")
-            gate_decision = await rewriter.evaluate_and_route(
+            sci_task = rewriter.evaluate_and_route(
                 query=query,
                 session_id=session_id,
                 history=history,
                 selected_chapters=selected_chapters,
+                selected_context_turn_id=selected_turn_id,
+                history_enabled=hist_enabled,
+                domain="science_textbook"
+            )
+            faq_task = rewriter.evaluate_and_route(
+                query=query,
+                session_id=session_id,
+                history=history,
+                selected_faq_categories=selected_faq_categories,
+                selected_context_turn_id=selected_turn_id,
+                history_enabled=hist_enabled,
+                domain="administrative_faq"
+            )
+            sci_dec, faq_dec = await asyncio.gather(sci_task, faq_task)
+            sci_ok = not getattr(sci_dec, "is_refusal", False) and not getattr(sci_dec, "bypass_retrieval", False)
+            faq_ok = not getattr(faq_dec, "is_refusal", False) and not getattr(faq_dec, "bypass_retrieval", False)
+
+            if sci_ok and faq_ok:
+                gate_decision = sci_dec
+                combined_subs = list(dict.fromkeys(
+                    (getattr(sci_dec, "sub_queries", []) or [sci_dec.effective_query or query]) +
+                    (getattr(faq_dec, "sub_queries", []) or [faq_dec.effective_query or query])
+                ))
+            elif faq_ok:
+                gate_decision = faq_dec
+                combined_subs = getattr(faq_dec, "sub_queries", [])
+            else:
+                gate_decision = sci_dec
+                combined_subs = getattr(sci_dec, "sub_queries", [])
+
+            effective_query = getattr(gate_decision, "effective_query", query)
+            proceed = sci_ok or faq_ok
+            is_refusal = not proceed
+            self.last_intent_tier = getattr(gate_decision.intent_tier, "value", str(gate_decision.intent_tier))
+            self.last_context_need_tier = getattr(gate_decision.context_need_tier, "value", str(gate_decision.context_need_tier))
+            is_history_only = (getattr(gate_decision.context_need_tier, "value", "") == "needs_history_only")
+            sub_queries = combined_subs
+            refusal_reason = getattr(gate_decision, "reasoning", "")
+            self.last_gate_decision = gate_decision
+        elif use_route:
+            selected_turn_id = (config or {}).get("selected_context_turn_id")
+            target_dom = "administrative_faq" if is_faq_only else "science_textbook"
+            gate_decision = await rewriter.evaluate_and_route(
+                query=query,
+                session_id=session_id,
+                history=history,
+                selected_chapters=selected_chapters if target_dom == "science_textbook" else None,
+                selected_faq_categories=selected_faq_categories if target_dom == "administrative_faq" else None,
+                domain=target_dom,
                 selected_context_turn_id=selected_turn_id,
                 history_enabled=hist_enabled
             )
@@ -517,21 +635,26 @@ class EnterpriseScienceGraph:
             chunks_for_synth = []
             if hasattr(gate_decision, "selected_history_items") and gate_decision.selected_history_items:
                 for item in gate_decision.selected_history_items:
-                    chunks_for_synth.append({
-                        "text": f"پرسش: {item.question}\nپاسخ: {item.answer}",
-                        "page": 1,
-                        "breadcrumb": "گفتگوی پیشین",
-                        "doc_id": "conversation_history",
-                        "chunk_id": item.turn_id
-                    })
+                    text_content = format_history_turn_for_context(item)
+                    if text_content:
+                        chunks_for_synth.append({
+                            "text": text_content,
+                            "page": 1,
+                            "breadcrumb": "گفتگوی پیشین",
+                            "doc_id": "conversation_history",
+                            "chunk_id": getattr(item, "turn_id", "turn_hist")
+                        })
             elif history:
-                for t in history[-3:]:
+                for t in history[-4:]:
+                    content_str = format_history_turn_for_context(t)
+                    if not content_str:
+                        content_str = f"{t.get('role', 'user')}: {t.get('content', '')}"
                     chunks_for_synth.append({
-                        "text": f"{t.get('role', 'user')}: {t.get('content', '')}",
+                        "text": content_str,
                         "page": 1,
                         "breadcrumb": "گفتگوی پیشین",
                         "doc_id": "conversation_history",
-                        "chunk_id": "turn_hist"
+                        "chunk_id": t.get("turn_id", "turn_hist")
                     })
 
             first_token_received = False
@@ -541,7 +664,7 @@ class EnterpriseScienceGraph:
                 chunks=chunks_for_synth,
                 system_prompt=SYSTEM_PROMPT_PERSIAN_GROUNDED,
                 session_id=session_id,
-                history=history
+                history=None
             ):
                 if not first_token_received:
                     first_token_received = True
@@ -549,11 +672,13 @@ class EnterpriseScienceGraph:
                 yield token
 
             latencies["synthesis_ms"] = round((time.perf_counter() - synth_start) * 1000.0, 2)
+            self.last_full_prompt = getattr(synthesizer, "last_full_prompt", "")
             if session_id:
                 self._session_citations[session_id] = []
                 self._session_is_refusal[session_id] = False
                 self._session_effective_query[session_id] = effective_query
                 self._session_latencies[session_id] = latencies
+                self._session_full_prompts[session_id] = self.last_full_prompt
             return
 
         # 2. Hybrid Retrieval
@@ -566,27 +691,68 @@ class EnterpriseScienceGraph:
             from rag_core.query.query_gate import QueryGate
             effective_query = QueryGate.enrich_query_with_summaries(effective_query, gate_decision.selected_history_items)
 
+        import inspect
+        try:
+            sig = inspect.signature(retriever.retrieve)
+            accepts_source = "source_domain" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+        except Exception:
+            accepts_source = False
+
+        async def _run_stream_retrieve(q_str: str) -> List[Any]:
+            if is_both and accepts_source:
+                sci_task = retriever.retrieve(
+                    query=q_str,
+                    top_k=self.overfetch_k,
+                    overfetch_k=self.overfetch_k,
+                    chapters=selected_chapters,
+                    source_domain="science_textbook"
+                )
+                faq_task = retriever.retrieve(
+                    query=q_str,
+                    top_k=self.overfetch_k,
+                    overfetch_k=self.overfetch_k,
+                    categories=selected_faq_categories,
+                    source_domain="administrative_faq"
+                )
+                sci_cands, faq_cands = await asyncio.gather(sci_task, faq_task)
+                combined = []
+                seen_ids = set()
+                for c in list(sci_cands) + list(faq_cands):
+                    cid = getattr(c, "chunk_id", None) or str(c)
+                    if cid not in seen_ids:
+                        seen_ids.add(cid)
+                        combined.append(c)
+                return combined
+            elif is_faq_only and accepts_source:
+                return await retriever.retrieve(
+                    query=q_str,
+                    top_k=self.overfetch_k,
+                    overfetch_k=self.overfetch_k,
+                    categories=selected_faq_categories,
+                    source_domain="administrative_faq"
+                )
+            else:
+                kwargs: Dict[str, Any] = {"query": q_str, "top_k": self.overfetch_k, "overfetch_k": self.overfetch_k}
+                if selected_chapters is not None and not is_faq_only:
+                    kwargs["chapters"] = selected_chapters
+                if accepts_source:
+                    kwargs["source_domain"] = "science_textbook"
+                return await retriever.retrieve(**kwargs)
+
         active_sub_queries = sub_queries if sub_queries else []
         if active_sub_queries and len(active_sub_queries) > 1:
-            tasks = [
-                retriever.retrieve(query=sq, top_k=self.overfetch_k, overfetch_k=self.overfetch_k, chapters=selected_chapters)
-                for sq in active_sub_queries
-            ]
+            tasks = [_run_stream_retrieve(sq) for sq in active_sub_queries]
             sub_results = await asyncio.gather(*tasks)
             candidates = []
             seen = set()
             for cand_list in sub_results:
                 for c in cand_list:
-                    if c.chunk_id not in seen:
+                    cid = getattr(c, "chunk_id", None) or str(c)
+                    if cid not in seen:
                         candidates.append(c)
-                        seen.add(c.chunk_id)
+                        seen.add(cid)
         else:
-            candidates = await retriever.retrieve(
-                query=effective_query,
-                top_k=self.overfetch_k,
-                overfetch_k=self.overfetch_k,
-                chapters=selected_chapters
-            )
+            candidates = await _run_stream_retrieve(effective_query)
         latencies["retrieval_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
         if not candidates:
@@ -639,33 +805,64 @@ class EnterpriseScienceGraph:
         for rc in reranked:
             c = getattr(rc, "candidate", rc)
             doc_id = getattr(c, "doc_id", "science_textbook") or "science_textbook"
-            if not doc_id.endswith(".pdf"):
-                doc_id = f"{doc_id}.pdf"
-            ch_info = DOC_TO_CHAPTER.get(doc_id)
-            c_page = getattr(c, "page", 1)
-            display_name = f"فصل {ch_info[0]}، صفحه {c_page}" if ch_info else f"کتاب درسی، صفحه {c_page}"
-            citation_candidates.append({
-                "doc_id": doc_id,
-                "filename": doc_id,
-                "page": c_page,
-                "chunk_id": getattr(c, "chunk_id", ""),
-                "score": getattr(rc, "cross_encoder_score", 0.0),
-                "metadata": {"title": getattr(c, "breadcrumbs", ""), "display_name": display_name}
-            })
+            if getattr(c, "category", None) or doc_id == "administrative_faq":
+                citation_candidates.append({
+                    "doc_id": "administrative_faq",
+                    "filename": "administrative_faq",
+                    "category": getattr(c, "category", "عمومی"),
+                    "row": getattr(c, "row", 1),
+                    "chunk_id": getattr(c, "chunk_id", ""),
+                    "score": getattr(rc, "cross_encoder_score", 0.0),
+                    "metadata": {
+                        "category": getattr(c, "category", "عمومی"),
+                        "row": getattr(c, "row", 1),
+                        "display_name": f"پرسش‌های متداول: {getattr(c, 'category', 'عمومی')}"
+                    }
+                })
+            else:
+                if not doc_id.endswith(".pdf"):
+                    doc_id = f"{doc_id}.pdf"
+                ch_info = DOC_TO_CHAPTER.get(doc_id)
+                c_page = getattr(c, "page", 1)
+                display_name = f"فصل {ch_info[0]}، صفحه {c_page}" if ch_info else f"کتاب درسی، صفحه {c_page}"
+                citation_candidates.append({
+                    "doc_id": doc_id,
+                    "filename": doc_id,
+                    "page": c_page,
+                    "chunk_id": getattr(c, "chunk_id", ""),
+                    "score": getattr(rc, "cross_encoder_score", 0.0),
+                    "metadata": {"title": getattr(c, "breadcrumbs", ""), "display_name": display_name}
+                })
         formatter = CitationFormatter()
         citation_bundle = formatter.format(citation_candidates)
 
         default_synth_doc = citation_candidates[0]["doc_id"] if citation_candidates else "science_textbook.pdf"
-        chunks_for_synth = [
-            {
+
+        hist_chunks = []
+        if use_route and hasattr(gate_decision, "selected_history_items") and gate_decision.selected_history_items:
+            for item in gate_decision.selected_history_items:
+                text_content = format_history_turn_for_context(item)
+                if text_content:
+                    hist_chunks.append({
+                        "text": text_content,
+                        "page": 1,
+                        "breadcrumb": "گفتگوی پیشین",
+                        "doc_id": "conversation_history",
+                        "chunk_id": getattr(item, "turn_id", "turn_hist")
+                    })
+
+        chunks_for_synth = list(hist_chunks)
+        for sec in reordered_sections:
+            is_faq_sec = getattr(sec, "chapter", 1) == 0
+            sec_doc = "administrative_faq" if is_faq_sec else default_synth_doc
+            bcrumb = sec.title if is_faq_sec else f"فصل {sec.chapter}: {sec.title}"
+            chunks_for_synth.append({
                 "text": sec.full_text,
                 "page": sec.page_start,
-                "breadcrumb": f"فصل {sec.chapter}: {sec.title}",
-                "doc_id": default_synth_doc,
+                "breadcrumb": bcrumb,
+                "doc_id": sec_doc,
                 "chunk_id": sec.section_id
-            }
-            for sec in reordered_sections
-        ]
+            })
 
         is_compound = False
         if use_route and hasattr(gate_decision, "is_compound"):
@@ -673,8 +870,16 @@ class EnterpriseScienceGraph:
         elif 'rewrite_decision' in locals():
             is_compound = bool(getattr(rewrite_decision, "is_compound", False))
 
-        synth_prompt = SYSTEM_PROMPT_PERSIAN_GROUNDED
-        if is_compound:
+        if is_both:
+            from rag_core.generation.prompts import SYSTEM_PROMPT_COMPOSITE_GROUNDED
+            synth_prompt = SYSTEM_PROMPT_COMPOSITE_GROUNDED
+        elif is_faq_only:
+            from rag_core.generation.prompts import SYSTEM_PROMPT_ADMIN_FAQ_GROUNDED
+            synth_prompt = SYSTEM_PROMPT_ADMIN_FAQ_GROUNDED
+        else:
+            synth_prompt = SYSTEM_PROMPT_PERSIAN_GROUNDED
+
+        if is_compound and not is_both:
             synth_prompt = f"{synth_prompt}\n\n{PROMPT_COMPOUND_DIRECTIVE_FA}"
         if hist_enabled:
             from rag_core.generation.prompts import PROMPT_INCREMENTAL_SUMMARY_DIRECTIVE_FA
@@ -691,17 +896,26 @@ class EnterpriseScienceGraph:
         summary_tokens = []
         pending_buffer = ""
 
-        # Only transition to in_summary when the explicit summary marker appears
-        summary_regex = re.compile(r"<!--\s*SUMMARY\s*-->|دستورالعمل ثبت خلاصه", re.IGNORECASE)
-        # Prefixes that might indicate an incoming summary tag across token boundaries
-        marker_prefixes = ("<!-", "<!--", "دستور", "دستورالعمل")
+        # Delimiters and prefixes indicating the start of the memory summary block
+        delimiter_start_patterns = [
+            "<<<MEMORY_SUMMARY_START>>>",
+            "<!-- SUMMARY -->",
+            "<!-- TURN_SUMMARY -->",
+            "<!--SUMMARY-->",
+            "دستورالعمل ثبت خلاصه",
+        ]
+        summary_regex = re.compile(
+            r"<<<MEMORY_SUMMARY_START>>>|<!--\s*(?:TURN_)?SUMMARY\s*-->|دستورالعمل ثبت خلاصه",
+            re.IGNORECASE
+        )
 
+        synth_history = None if (use_route or hist_chunks) else history
         async for token in synthesizer.synthesize_stream(
             query=effective_query,
             chunks=chunks_for_synth,
             system_prompt=synth_prompt,
             session_id=session_id,
-            history=history,
+            history=synth_history,
         ):
             if in_summary:
                 summary_tokens.append(token)
@@ -710,7 +924,7 @@ class EnterpriseScienceGraph:
             test_text = pending_buffer + token
             match = summary_regex.search(test_text)
             if match:
-                # Text before the summary marker belongs to the actual answer
+                # Text preceding the summary marker belongs to the actual answer
                 prefix_clean = test_text[:match.start()]
                 if prefix_clean:
                     if first_token:
@@ -722,18 +936,35 @@ class EnterpriseScienceGraph:
                 in_summary = True
                 summary_tokens.append(test_text[match.start():])
                 pending_buffer = ""
-            elif any(test_text.endswith(p) for p in marker_prefixes) and len(test_text) <= 50:
-                # Potential start of summary marker split across chunks; hold briefly
-                pending_buffer = test_text
             else:
-                to_emit = test_text
-                pending_buffer = ""
-                if to_emit:
-                    if first_token:
-                        self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
-                        first_token = False
-                    full_tokens.append(to_emit)
-                    yield to_emit
+                # Check if test_text ends with a partial prefix of any delimiter marker
+                split_idx = -1
+                for d in delimiter_start_patterns:
+                    max_k = min(len(test_text), len(d))
+                    for k in range(max_k, 0, -1):
+                        if test_text.endswith(d[:k]):
+                            cand_idx = len(test_text) - k
+                            if split_idx == -1 or cand_idx < split_idx:
+                                split_idx = cand_idx
+                if split_idx != -1 and (len(test_text) - split_idx) < 32:
+                    # Partial match found at the tail; hold back the partial suffix
+                    prefix_to_emit = test_text[:split_idx]
+                    pending_buffer = test_text[split_idx:]
+                    if prefix_to_emit:
+                        if first_token:
+                            self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                            first_token = False
+                        full_tokens.append(prefix_to_emit)
+                        yield prefix_to_emit
+                else:
+                    to_emit = test_text
+                    pending_buffer = ""
+                    if to_emit:
+                        if first_token:
+                            self.last_ttft_ms = round((time.perf_counter() - total_start) * 1000.0, 2)
+                            first_token = False
+                        full_tokens.append(to_emit)
+                        yield to_emit
 
         # Flush any trailing pending buffer if summary marker never materialized
         if pending_buffer and not in_summary:
@@ -745,42 +976,46 @@ class EnterpriseScienceGraph:
 
         latencies["synthesis_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         accumulated_answer = "".join(full_tokens).strip()
-        accumulated_answer = re.sub(r"(?:دستورالعمل ثبت خلاصه[^\n]*\n+)?<!--\s*SUMMARY\s*-->[\s\S]*$", "", accumulated_answer, flags=re.IGNORECASE).strip()
-        accumulated_answer = re.sub(r"دستورالعمل ثبت خلاصه در حافظه[\s\S]*$", "", accumulated_answer, flags=re.IGNORECASE).strip()
+        summary_raw = "".join(summary_tokens)
+
+        # Parse and sanitize answer and summary using TurnMemoryPayload
+        raw_combined = f"{accumulated_answer}\n{summary_raw}" if summary_raw else accumulated_answer
+        from rag_core.generation.synthesizer import ResponseSynthesizer
+        try:
+            clean_ans, clean_summary = ResponseSynthesizer.parse_answer_and_summary(raw_combined)
+        except Exception:
+            clean_ans, clean_summary = accumulated_answer, None
+        if clean_ans:
+            accumulated_answer = clean_ans
+
+        from rag_core.generation.synthesizer import sanitize_math_markup
+        accumulated_answer = sanitize_math_markup(accumulated_answer)
 
         is_refusal = (
             "اطلاعات کافی برای پاسخ" in accumulated_answer
             or "اطلاعاتی درباره این پرسش در کتاب یافت نشد" in accumulated_answer
+            or "خارج از چارچوب کتاب" in accumulated_answer
         )
         if citation_bundle.inline_text and not is_refusal:
             yield f"\n\n---\n\n**Sources:**\n{citation_bundle.inline_text}"
 
-        # Extract or derive structured summary for session memory (User Story 5)
-        summary_raw = "".join(summary_tokens)
-        clean_summary = None
-        if summary_raw:
-            clean_summary = (
-                summary_raw
-                .replace("<!-- SUMMARY -->", "")
-                .replace("<!-- /SUMMARY -->", "")
-                .replace("<!--", "")
-                .replace("-->", "")
-                .strip()
-            )
-            clean_summary = re.sub(r"دستورالعمل ثبت خلاصه[^\n]*\n+", "", clean_summary, flags=re.IGNORECASE).strip()
-            clean_summary = re.sub(r"توجه بسیار مهم:\s*از خلاصه‌سازی[\s\S]*$", "", clean_summary, flags=re.IGNORECASE).strip()
         if not clean_summary and not is_refusal and accumulated_answer:
-            clean_summary = accumulated_answer[:250].strip()
+            sentences = [s.strip() for s in re.split(r"[.!?\n]+", accumulated_answer) if s.strip()]
+            clean_summary = ". ".join(sentences[:2]) if sentences else accumulated_answer[:250].strip()
+            if len(clean_summary) > 250:
+                clean_summary = clean_summary[:250].strip()
 
         self.last_summary = clean_summary
         self.last_citations = citation_bundle.citations
         self.last_is_refusal = is_refusal
         self.last_effective_query = effective_query
+        self.last_full_prompt = getattr(synthesizer, "last_full_prompt", "")
         if session_id:
             self._session_citations[session_id] = citation_bundle.citations
             self._session_is_refusal[session_id] = is_refusal
             self._session_effective_query[session_id] = effective_query
             self._session_latencies[session_id] = latencies
             self._session_summaries[session_id] = clean_summary
+            self._session_full_prompts[session_id] = self.last_full_prompt
 
 

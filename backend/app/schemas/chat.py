@@ -18,6 +18,7 @@ class DialogueTurn(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     citations: List[PageCitation] = Field(default_factory=list)
     latency_profile: Dict[str, float] = Field(default_factory=dict)
+    summary: Optional[str] = Field(default=None, description="Structured summary of this dialogue turn")
 
 
 class SessionState(BaseModel):
@@ -40,6 +41,11 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, str]]] = Field(default=None, description="Client-side prior dialogue turns")
     selected_context_turn_id: Optional[str] = Field(default=None, description="Explicit turn ID selected by user when history is disabled")
     history_enabled: bool = Field(default=True, description="Whether conversational memory is enabled")
+    pipeline_mode: str = Field(default="advanced", description="'advanced' (Enterprise Graph) or 'naive' (Baseline)")
+    source: str = Field(default="science_textbook", description="'science_textbook' or 'administrative_faq'")
+    selected_sources: Optional[List[str]] = Field(default=None, description="Explicit source corpora list e.g. ['science_textbook', 'administrative_faq']")
+    selected_categories: Optional[List[str]] = Field(default=None, description="Mode 1 scoped FAQ categories (legacy alias)")
+    selected_faq_categories: Optional[List[str]] = Field(default=None, description="Mode 1 scoped FAQ categories")
 
 
 class ChatResponse(BaseModel):
@@ -56,7 +62,9 @@ class ChatResponse(BaseModel):
     intent_tier: Optional[str] = None
     context_need_tier: Optional[str] = None
     latency_profile: Dict[str, float] = Field(default_factory=dict)
+    cost_1k: Optional[Dict[str, Any]] = None
     trace_id: str = Field(default="", description="Langfuse root trace ID")
+    q_and_a_summary: Optional[str] = Field(default=None, description="Structured incremental summary of this turn for conversational memory")
 
 
 class StreamEventData(BaseModel):
@@ -74,6 +82,10 @@ class StreamEventData(BaseModel):
     context_need_tier: Optional[str] = None
     ttft_ms: Optional[float] = None
     total_ms: Optional[float] = None
+    latency_profile: Optional[Dict[str, Any]] = None
+    cost_1k: Optional[Dict[str, Any]] = None
     trace_id: Optional[str] = None
     detail: Optional[str] = None
+    q_and_a_summary: Optional[str] = None
+    summary: Optional[str] = None
 
